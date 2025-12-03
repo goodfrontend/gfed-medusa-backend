@@ -5,7 +5,9 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
-    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "test": "turbo run test",
+    "format:check": "prettier --check .",
+    "format:fix": "prettier --write .",
     "check-types": "turbo run check-types"
   },
   "devDependencies": {
@@ -13,7 +15,7 @@
     "turbo": "^2.6.1",
     "typescript": "5.9.2"
   },
-  "packageManager": "pnpm@9.0.0",
+  "packageManager": "pnpm@10.18.2",
   "engines": {
     "node": ">=18"
   }
