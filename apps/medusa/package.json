@@ -23,6 +23,7 @@
     "dev": "medusa develop",
     "docker:up": "docker compose -f ./docker-compose.yml up --build",
     "docker:down": "docker compose -f ./docker-compose.yml down",
+    "docker:seed": "docker compose -f ./docker-compose.yml exec medusa pnpm run seed",
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "format:fix": "prettier --write .",

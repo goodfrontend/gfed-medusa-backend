@@ -2,6 +2,10 @@
 
 set -e
 
+# Ensure paths referenced by admin build exist inside the container
+mkdir -p /apps
+ln -sfn /app/apps/medusa /apps/medusa
+
 echo "Publishing medusa-plugin-shopify..."
 (
   cd ../../packages/medusa-plugin-shopify
@@ -10,9 +14,6 @@ echo "Publishing medusa-plugin-shopify..."
 
 echo "Running database migrations..."
 npx medusa db:migrate
-
-echo "Seeding database..."
-pnpm run seed || echo "Seeding failed, continuing..."
 
 echo "Starting Medusa development server..."
 pnpm run dev
