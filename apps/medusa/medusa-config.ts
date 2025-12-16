@@ -16,6 +16,10 @@ module.exports = defineConfig({
       jwtSecret: process.env.JWT_SECRET || 'supersecret',
       cookieSecret: process.env.COOKIE_SECRET || 'supersecret',
     },
+    databaseDriverOptions: {
+      ssl: false,
+      sslmode: 'disable',
+    },
   },
   admin: {
     backendUrl: process.env.MEDUSA_BACKEND_URL,

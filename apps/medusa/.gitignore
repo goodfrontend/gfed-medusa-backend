@@ -28,3 +28,4 @@ build
 #Yalc
 .yalc
 yalc.lock
+.env.docker

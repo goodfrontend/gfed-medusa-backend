@@ -21,6 +21,8 @@
     "start": "NODE_ENV=development medusa start",
     "start:prod": "NODE_ENV=production medusa start",
     "dev": "medusa develop",
+    "docker:up": "docker compose -f ./docker-compose.yml up --build",
+    "docker:down": "docker compose -f ./docker-compose.yml down",
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "format:fix": "prettier --write .",
