@@ -33,14 +33,14 @@ ENV CI=true
 COPY . .
 
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter medusa run build
+RUN pnpm --filter medusa run build:prod
 
 FROM base AS runner
 
 ENV NODE_ENV=production \
     PORT=9000
 
-WORKDIR /app
+WORKDIR /app/apps/medusa/.medusa/server
 
 COPY --from=builder /app /app
 
@@ -48,8 +48,6 @@ RUN chown -R node:node /app
 
 USER node
 
-WORKDIR /app/apps/medusa
-
 EXPOSE 9000
 
-CMD ["sh", "-c", "pnpm run predeploy && pnpm run start:prod"]
+CMD ["pnpm", "run", "start:prod"]
