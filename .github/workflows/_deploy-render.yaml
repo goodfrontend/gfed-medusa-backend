@@ -1,0 +1,130 @@
+name: Deploy to Render
+
+on:
+  workflow_call:
+    inputs:
+      environment_name:
+        required: true
+        type: string
+      deploy_label:
+        required: true
+        type: string
+      service_name:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+    secrets:
+      RENDER_API_KEY:
+        required: true
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.deploy_label }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+    steps:
+      - name: Trigger Render deployment
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+
+          service_data=$(
+              curl -s "https://api.render.com/v1/services?name=$SERVICE_NAME&limit=1" \
+                  -H "Authorization: Bearer $RENDER_API_KEY" \
+                  -H "Accept: application/json" \
+              | jq -r '.[0].service'
+          )
+
+          service_id=$(echo "$service_data" | jq -r '.id // empty')
+          service_owner_id=$(echo "$service_data" | jq -r '.ownerId // empty')
+
+          if [ -z "$service_id" ]; then
+              echo "::error::Service not found: $SERVICE_NAME"
+              exit 1
+          fi
+
+          update_resp=$(
+              curl -s -w "\n%{http_code}" -X PATCH "https://api.render.com/v1/services/$service_id" \
+                  -H "Authorization: Bearer $RENDER_API_KEY" \
+                  -H "Accept: application/json" \
+                  -H "Content-Type: application/json" \
+                  -d "{
+                          \"image\": {
+                              \"ownerId\": \"$service_owner_id\",
+                              \"imagePath\": \"$IMAGE\"
+                          }
+                      }" \
+          )
+
+          update_body=$(echo "$update_resp" | head -n -1)
+          update_status=$(echo "$update_resp" | tail -n 1)
+
+          if [ "$update_status" -ge 300 ]; then
+              echo "::error::Service update failed ($update_status): $update_body"
+              exit 1
+          fi
+
+          updated=$(echo "$update_body" | jq -r '.imagePath // empty')
+
+          if [ "$updated" != "$IMAGE" ]; then
+              echo "::error::Failed to update service; expected imagePath $IMAGE but got $updated"
+              exit 1
+          fi
+
+          deploy_resp=$(
+              curl -s -w "\n%{http_code}" -X POST "https://api.render.com/v1/services/$service_id/deploys" \
+                  -H "Authorization: Bearer $RENDER_API_KEY" \
+                  -H "Content-Type: application/json" \
+          )
+
+          deploy_body=$(echo "$deploy_resp" | head -n -1)
+          deploy_status=$(echo "$deploy_resp" | tail -n 1)
+
+          if [ "$deploy_status" -ge 300 ]; then
+              echo "::error::Failed to trigger deploy ($deploy_status): $deploy_body"
+              exit 1
+          fi
+
+          dep_id=$(echo "$deploy_body" | jq -r '.id // empty')
+
+          if [ -z "$dep_id" ]; then
+              echo "::error::Deployment was not triggered; response: $deploy_body"
+              exit 1
+          fi
+
+          max_attempts=30
+          sleep_seconds=30
+          attempts=1
+
+          while [ "$attempts" -le "$max_attempts" ]; do
+              status=$(curl -s "https://api.render.com/v1/services/$service_id/deploys/$dep_id" \
+              -H "Authorization: Bearer $RENDER_API_KEY" \
+              -H "Accept: application/json" \
+              | jq -r '.status // empty')
+
+              echo "Attempt $attempts/$max_attempts: Status is '$status'"
+
+              # created queued build_in_progress update_in_progress live deactivated build_failed
+              # update_failed canceled pre_deploy_in_progress pre_deploy_failed
+              case "$status" in
+                  "live")
+                      echo "Deployment is live"
+                      exit 0
+                      ;;
+                  "build_failed"|"update_failed"|"canceled"|"pre_deploy_failed")
+                      echo "Deployment failed: $status"
+                      exit 1
+                      ;;
+              esac
+
+              attempts=$((attempts + 1))
+              sleep "$sleep_seconds"
+          done
+
+          echo "::error::Deployment timed out"
+          exit 1

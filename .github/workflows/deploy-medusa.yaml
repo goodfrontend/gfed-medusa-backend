@@ -1,0 +1,62 @@
+name: Deploy
+
+on:
+  push:
+    branches: ["main"]
+
+concurrency:
+  group: medusa-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  deployments: write
+
+env:
+  NODE_VERSION: 20
+  PNPM_VERSION: 10.18.2
+
+jobs:
+  build:
+    name: Build Docker image
+    uses: ./.github/workflows/_build-docker.yaml
+    with:
+      app: medusa
+      dockerfile: ./apps/medusa/Dockerfile
+
+  deploy-smoke:
+    name: Deploy to Smoke
+    needs: build
+    uses: ./.github/workflows/_deploy-render.yaml
+    with:
+      environment_name: smoke
+      deploy_label: Smoke
+      service_name: gfed-medusa-be-smoke
+      image: ${{ needs.build.outputs.image_tag }}
+    secrets:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+
+  deploy-qa:
+    name: Deploy to QA
+    needs: [build, deploy-smoke]
+    uses: ./.github/workflows/_deploy-render.yaml
+    with:
+      environment_name: qa
+      deploy_label: QA
+      service_name: gfed-medusa-be-qa
+      image: ${{ needs.build.outputs.image_tag }}
+    secrets:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+
+  deploy-prod:
+    name: Deploy to Production
+    needs: [build, deploy-qa]
+    uses: ./.github/workflows/_deploy-render.yaml
+    with:
+      environment_name: production
+      deploy_label: Production
+      service_name: gfed-medusa-be-prod
+      image: ${{ needs.build.outputs.image_tag }}
+    secrets:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
