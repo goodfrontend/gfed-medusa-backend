@@ -18,7 +18,34 @@ env:
   PNPM_VERSION: 10.18.2
 
 jobs:
+  detect-changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      medusa: ${{ steps.changes.outputs.medusa }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          base: ${{ github.event.before || 'HEAD^' }}
+          filters: |
+            medusa:
+              - "apps/medusa/**"
+              - "packages/**"
+              - "package.json"
+              - "pnpm-lock.yaml"
+              - "pnpm-workspace.yaml"
+              - "turbo.json"
+              - 'render.yaml'
+              - ".github/workflows/**"
+
   build:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.medusa == 'true'
     name: Build Docker image
     uses: ./.github/workflows/_build-docker.yaml
     with:

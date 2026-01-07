@@ -9,17 +9,7 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "turbo.json"
-      - ".github/workflows/medusa-*.yml"
-  push:
-    branches: ["main"]
-    paths:
-      - "apps/medusa/**"
-      - "packages/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "turbo.json"
-      - ".github/workflows/medusa-*.yml"
+      - ".github/workflows/**"
 
 concurrency:
   group: medusa-pr-${{ github.event.pull_request.number }}
