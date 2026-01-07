@@ -1,6 +1,6 @@
 # GFED Medusa Backend Monorepo
 
-A monorepo containing MedusaJS backend application, Shopify-to-Medusa data migration plugin, and shared tooling (ESLint, Jest, Prettier, Typescript).
+A monorepo containing MedusaJS backend application, Shopify-to-Medusa data migration plugin, and shared tooling (ESLint, Jest, Prettier, and Typescript).
 
 ## Pre-requisites
 
