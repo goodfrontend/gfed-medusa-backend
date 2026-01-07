@@ -10,7 +10,7 @@ projects:
             region: singapore
             autoDeployTrigger: off
             image:
-              url: traefik/whoami:v1.11
+              url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:latest
             envVars:
               - fromGroup: backend-env-group-prod
       - name: QA
@@ -22,7 +22,7 @@ projects:
             region: singapore
             autoDeployTrigger: off
             image:
-              url: traefik/whoami:v1.11
+              url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:latest
             envVars:
               - fromGroup: backend-env-group-qa
       - name: Smoke
@@ -34,6 +34,6 @@ projects:
             region: singapore
             autoDeployTrigger: off
             image:
-              url: traefik/whoami:v1.11
+              url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:latest
             envVars:
               - fromGroup: backend-env-group-smoke
