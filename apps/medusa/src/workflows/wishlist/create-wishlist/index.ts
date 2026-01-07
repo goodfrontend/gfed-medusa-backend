@@ -11,6 +11,7 @@ type CreateWishlistWorkflowInput = {
   sales_channel_id: string;
 };
 
+// Create wishlist
 export const createWishlistWorkflow = createWorkflow(
   'create-wishlist',
   (input: CreateWishlistWorkflowInput) => {
