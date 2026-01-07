@@ -50,4 +50,4 @@ USER node
 
 EXPOSE 9000
 
-CMD ["pnpm", "run", "start:prod"]
+CMD ["sh", "-c", "pnpm run predeploy && pnpm run start:prod"]
