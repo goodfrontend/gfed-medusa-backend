@@ -56,7 +56,7 @@ jobs:
     with:
       environment_name: production
       deploy_label: Production
-      service_name: gfed-medusa-be-prod
+      service_name: gfed-medusa-be
       image: ${{ needs.build.outputs.image_tag }}
     secrets:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
