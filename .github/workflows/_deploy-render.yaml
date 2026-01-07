@@ -97,7 +97,7 @@ jobs:
               exit 1
           fi
 
-          max_attempts=30
+          max_attempts=60
           sleep_seconds=30
           attempts=1
 
