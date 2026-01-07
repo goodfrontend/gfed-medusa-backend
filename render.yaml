@@ -6,7 +6,7 @@ projects:
           - type: web
             runtime: image
             plan: free
-            name: gfed-medusa-backend-prod
+            name: gfed-medusa-be
             region: singapore
             autoDeployTrigger: off
             image:
@@ -18,7 +18,7 @@ projects:
           - type: web
             runtime: image
             plan: free
-            name: gfed-medusa-backend-qa
+            name: gfed-medusa-be-qa
             region: singapore
             autoDeployTrigger: off
             image:
@@ -30,7 +30,7 @@ projects:
           - type: web
             runtime: image
             plan: free
-            name: gfed-medusa-backend-smoke
+            name: gfed-medusa-be-smoke
             region: singapore
             autoDeployTrigger: off
             image:
