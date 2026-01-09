@@ -55,7 +55,7 @@ jobs:
     name: Build preview image
     if: github.event.pull_request.head.repo.full_name == github.repository
     needs: validate
-    uses: ./.github/workflows/_build-docker.yml
+    uses: ./.github/workflows/_build-docker.yaml
     permissions:
       contents: read
       packages: write
