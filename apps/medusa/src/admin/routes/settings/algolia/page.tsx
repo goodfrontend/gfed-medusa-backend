@@ -30,7 +30,7 @@ const AlgoliaPage = () => {
       </div>
       <div className="px-6 py-8">
         <Button variant="primary" onClick={handleSync} isLoading={isPending}>
-          Sync Data to Algolia
+          Sync Data to Algolia TEST
         </Button>
       </div>
     </Container>
