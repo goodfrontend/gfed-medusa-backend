@@ -8,6 +8,7 @@ type CreateWishlistStepInput = {
   sales_channel_id: string;
 };
 
+// Create wishlist step
 export const createWishlistStep = createStep(
   'create-wishlist',
   async (input: CreateWishlistStepInput, { container }) => {
