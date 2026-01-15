@@ -5,6 +5,7 @@ type ValidateCustomerCreateWishlistStepInput = {
   customer_id: string;
 };
 
+// Validate customer create wishlist step
 export const validateCustomerCreateWishlistStep = createStep(
   'validate-customer-create-wishlist',
   async (
