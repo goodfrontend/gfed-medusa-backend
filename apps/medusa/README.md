@@ -83,6 +83,8 @@ pnpm run db:seed:stock
 - Start the stack from the root with `pnpm --filter medusa docker:up` (or from `apps/medusa` with `pnpm docker:up`). The Medusa container runs `start.sh`, which publishes `medusa-plugin-shopify`, runs migrations (`medusa db:migrate`), then starts `pnpm run dev` with hot reload. Postgres 17 is provided automatically via compose. The DB is exposed on host port `5433` (container `5432`) to avoid clashing with a local Postgres—connect from your host via `localhost:5433` if needed. Enable Redis later with `--profile redis` and by setting `REDIS_URL` in `.env.docker`.
 - Seed manually if needed: `pnpm --filter medusa docker:seed` (runs `pnpm run seed` in the container). Do this only once to avoid duplicate data.
 - Create an admin user inside the running container if needed: `docker compose -f ./docker-compose.yml exec medusa npx medusa user -e you@example.com -p password`.
+- Migrate Shopify products (follow this [guide](../../packages/medusa-plugin-shopify/README.md#how-to-use-the-api))
+- After all data has been migrated, run the ff command to add stock to all existing variants: `pnpm --filter medusa docker:seed:stock` (runs `pnpm run db:seed:stock` in the container)
 - Stop the stack with `pnpm --filter medusa docker:down` (or `pnpm docker:down` from `apps/medusa`; add `-v` to drop the Postgres/Redis volumes).
 
 ## Docker image / Render deployment
