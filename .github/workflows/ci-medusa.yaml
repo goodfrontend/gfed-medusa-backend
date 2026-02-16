@@ -39,6 +39,23 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-medusa-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-medusa-
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Setup Turbo remote caching
+        uses: rharkor/caching-for-turbo@v2.3.11
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

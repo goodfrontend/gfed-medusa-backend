@@ -30,3 +30,7 @@ packages/*/.turbo
 packages/*/.medusa
 packages/*/dist
 packages/*/build
+*.md
+.github
+**/*.test.ts
+**/*.spec.ts
