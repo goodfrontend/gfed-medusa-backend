@@ -8,24 +8,30 @@ RUN apt-get update && apt-get upgrade -y && apt-get clean && rm -rf /var/lib/apt
 ENV PNPM_HOME="/pnpm" \
     PATH="$PNPM_HOME:$PATH"
 
+RUN mkdir -p /pnpm /app && chown -R node:node /pnpm /app
+
 RUN corepack enable
 
 WORKDIR /app
 
 FROM base AS deps
 
-COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json .npmrc ./
-COPY apps/medusa/package.json apps/medusa/package.json
-COPY packages/medusa-plugin-shopify/package.json packages/medusa-plugin-shopify/package.json
-COPY packages/eslint-config/package.json packages/eslint-config/package.json
-COPY packages/prettier-config/package.json packages/prettier-config/package.json
-COPY packages/typescript-config/package.json packages/typescript-config/package.json
+COPY --chown=node:node pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json .npmrc ./
+COPY --chown=node:node apps/medusa/package.json apps/medusa/package.json
+COPY --chown=node:node packages/medusa-plugin-shopify/package.json packages/medusa-plugin-shopify/package.json
+COPY --chown=node:node packages/eslint-config/package.json packages/eslint-config/package.json
+COPY --chown=node:node packages/prettier-config/package.json packages/prettier-config/package.json
+COPY --chown=node:node packages/typescript-config/package.json packages/typescript-config/package.json
+
+USER node
 
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS dev
 
-COPY . .
+COPY --chown=node:node . .
+
+USER node
 
 CMD ["pnpm", "--filter", "medusa", "dev"]
 
@@ -33,7 +39,9 @@ FROM deps AS builder
 
 ENV CI=true
 
-COPY . .
+COPY --chown=node:node . .
+
+USER node
 
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter medusa run build:prod
@@ -45,9 +53,7 @@ ENV NODE_ENV=production \
 
 WORKDIR /app/apps/medusa/.medusa/server
 
-COPY --from=builder /app /app
-
-RUN chown -R node:node /app
+COPY --from=builder --chown=node:node /app /app
 
 USER node
 
