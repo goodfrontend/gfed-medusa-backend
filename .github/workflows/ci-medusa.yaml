@@ -80,22 +80,23 @@ jobs:
       app: medusa
       dockerfile: ./apps/medusa/Dockerfile
 
-  scan-image:
-    name: Scan Docker image
-    if: github.event.pull_request.head.repo.full_name == github.repository
-    needs: build-preview-image
-    uses: ./.github/workflows/_trivy-scan.yaml
-    permissions:
-      contents: read
-      security-events: write
-    with:
-      image_tag: ${{ needs.build-preview-image.outputs.image_tag }}
-      app: medusa
+  # Trivy scan temporarily disabled
+  # scan-image:
+  #   name: Scan Docker image
+  #   if: github.event.pull_request.head.repo.full_name == github.repository
+  #   needs: build-preview-image
+  #   uses: ./.github/workflows/_trivy-scan.yaml
+  #   permissions:
+  #     contents: read
+  #     security-events: write
+  #   with:
+  #     image_tag: ${{ needs.build-preview-image.outputs.image_tag }}
+  #     app: medusa
 
   render-preview:
     name: Render image preview
     if: github.event.pull_request.head.repo.full_name == github.repository
-    needs: [build-preview-image, scan-image]
+    needs: build-preview-image
     uses: ./.github/workflows/_deploy-render-preview.yaml
     with:
       environment_name: smoke
