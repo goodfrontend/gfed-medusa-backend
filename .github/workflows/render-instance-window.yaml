@@ -36,6 +36,7 @@ on:
 permissions:
   contents: read
   deployments: write
+  actions: write
 
 concurrency:
   group: render-instance-window-config
@@ -413,6 +414,32 @@ jobs:
             echo "deployment_id=$state_deployment_id"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Trigger immediate reconciler run
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          dispatch_payload=$(jq -cn --arg ref "$DEFAULT_BRANCH" '{ref: $ref}')
+          dispatch_response=$(
+            curl -sS -w "\n%{http_code}" -X POST \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/render-instance-window-reconciler.yaml/dispatches" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "$dispatch_payload"
+          )
+
+          dispatch_body=$(echo "$dispatch_response" | head -n -1)
+          dispatch_status=$(echo "$dispatch_response" | tail -n 1)
+
+          if [ "$dispatch_status" -ge 300 ]; then
+            echo "::warning::Failed to trigger immediate reconciler run ($dispatch_status): $dispatch_body"
+            echo "::warning::Scheduled cron reconciler will still run every 5 minutes."
+          fi
+
       - name: Print summary
         if: always()
         env:
@@ -437,6 +464,6 @@ jobs:
 
           echo "State deployment #$STATE_DEPLOYMENT_ID $STATE_ACTION."
           echo "Scheduled UTC window: $START_UTC -> $END_UTC"
-          echo "Reconciler will update render.yaml to '$TARGET_INSTANCE_TYPE' during the window and back to '$CURRENT_INSTANCE_TYPE' after end."
-          echo "Reconciler runs every 5 minutes; next run applies changes to render.yaml when the window phase changes."
-          echo "After each render.yaml change commit, manually run Blueprint sync in Render dashboard to apply live."
+          echo "Reconciler will update render.yaml and patch Render directly to '$TARGET_INSTANCE_TYPE' during the window."
+          echo "After end time, reconciler will revert both render.yaml and Render service back to '$CURRENT_INSTANCE_TYPE'."
+          echo "Reconciler runs every 5 minutes, and this workflow also triggers an immediate reconciler run."

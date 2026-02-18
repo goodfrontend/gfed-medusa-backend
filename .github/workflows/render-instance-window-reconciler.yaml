@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -103,6 +104,7 @@ jobs:
           echo "$window_json" | jq -e . >/dev/null
 
           service_name=$(echo "$window_json" | jq -r '.service_name // empty')
+          service_id=$(echo "$window_json" | jq -r '.service_id // empty')
           target_instance_type=$(echo "$window_json" | jq -r '.target_instance_type // empty')
           original_instance_type=$(echo "$window_json" | jq -r '.original_instance_type // empty')
           start_epoch=$(echo "$window_json" | jq -r '.start_epoch // empty')
@@ -138,6 +140,7 @@ jobs:
             echo "exists=true"
             echo "state_deployment_id=$active_deployment_id"
             echo "service_name=$service_name"
+            echo "service_id=$service_id"
             echo "target_instance_type=$target_instance_type"
             echo "original_instance_type=$original_instance_type"
             echo "desired_instance_type=$desired_instance_type"
@@ -245,6 +248,131 @@ jobs:
         if: steps.window.outputs.exists == 'true' && steps.window.outputs.phase == 'before'
         run: |
           echo "Current time is before the configured start time. No render.yaml change will be applied yet."
+
+      - name: Fetch current Render instance type
+        id: render_current
+        if: steps.window.outputs.exists == 'true' && steps.window.outputs.phase != 'before'
+        env:
+          SERVICE_ID_FROM_STATE: ${{ steps.window.outputs.service_id }}
+          SERVICE_NAME: ${{ steps.window.outputs.service_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RENDER_API_KEY:-}" ]; then
+            echo "::error::Missing required secret RENDER_API_KEY."
+            exit 1
+          fi
+
+          service_id="$SERVICE_ID_FROM_STATE"
+          current_instance_type=""
+
+          if [ -n "$service_id" ]; then
+            response=$(
+              curl -sS -w "\n%{http_code}" \
+                "https://api.render.com/v1/services/$service_id" \
+                -H "Authorization: Bearer $RENDER_API_KEY" \
+                -H "Accept: application/json"
+            )
+
+            body=$(echo "$response" | head -n -1)
+            status=$(echo "$response" | tail -n 1)
+
+            if [ "$status" -ge 300 ]; then
+              echo "::warning::Direct service lookup by id failed ($status), falling back to service name."
+              service_id=""
+            else
+              current_instance_type=$(echo "$body" | jq -r '.service.serviceDetails.plan // .serviceDetails.plan // empty')
+            fi
+          fi
+
+          if [ -z "$service_id" ]; then
+            encoded_service_name=$(python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["SERVICE_NAME"], safe=""))')
+
+            list_response=$(
+              curl -sS -w "\n%{http_code}" \
+                "https://api.render.com/v1/services?name=$encoded_service_name&limit=1" \
+                -H "Authorization: Bearer $RENDER_API_KEY" \
+                -H "Accept: application/json"
+            )
+
+            list_body=$(echo "$list_response" | head -n -1)
+            list_status=$(echo "$list_response" | tail -n 1)
+
+            if [ "$list_status" -ge 300 ]; then
+              echo "::error::Render service lookup failed ($list_status): $list_body"
+              exit 1
+            fi
+
+            service_data=$(echo "$list_body" | jq -c '.[0].service // empty')
+            service_id=$(echo "$service_data" | jq -r '.id // empty')
+            current_instance_type=$(echo "$service_data" | jq -r '.serviceDetails.plan // empty')
+          fi
+
+          if [ -z "$service_id" ]; then
+            echo "::error::Could not resolve Render service id for '$SERVICE_NAME'."
+            exit 1
+          fi
+
+          if [ -z "$current_instance_type" ]; then
+            echo "::error::Could not determine current Render instance type for '$SERVICE_NAME'."
+            exit 1
+          fi
+
+          case "$current_instance_type" in
+            free|starter|standard) ;;
+            *)
+              echo "::error::Unsupported current Render instance type '$current_instance_type'."
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "service_id=$service_id"
+            echo "current_instance_type=$current_instance_type"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Skip direct Render update when current already equals desired
+        if: steps.window.outputs.exists == 'true' && steps.window.outputs.phase != 'before' && steps.render_current.outputs.current_instance_type == steps.window.outputs.desired_instance_type
+        run: |
+          echo "Render service already matches desired instance type. Skipping direct Render API patch."
+
+      - name: Update Render instance type directly
+        id: render_update
+        if: steps.window.outputs.exists == 'true' && steps.window.outputs.phase != 'before' && steps.render_current.outputs.current_instance_type != steps.window.outputs.desired_instance_type
+        env:
+          SERVICE_ID: ${{ steps.render_current.outputs.service_id }}
+          DESIRED_INSTANCE_TYPE: ${{ steps.window.outputs.desired_instance_type }}
+        run: |
+          set -euo pipefail
+
+          payload=$(jq -cn --arg plan "$DESIRED_INSTANCE_TYPE" '{serviceDetails: {plan: $plan}}')
+          response=$(
+            curl -sS -w "\n%{http_code}" -X PATCH \
+              "https://api.render.com/v1/services/$SERVICE_ID" \
+              -H "Authorization: Bearer $RENDER_API_KEY" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              -d "$payload"
+          )
+
+          body=$(echo "$response" | head -n -1)
+          status=$(echo "$response" | tail -n 1)
+
+          if [ "$status" -ge 300 ]; then
+            echo "::error::Failed to update Render instance type directly ($status): $body"
+            exit 1
+          fi
+
+          updated_instance_type=$(echo "$body" | jq -r '.service.serviceDetails.plan // .serviceDetails.plan // empty')
+          if [ "$updated_instance_type" != "$DESIRED_INSTANCE_TYPE" ]; then
+            echo "::error::Render instance type update did not apply. Expected '$DESIRED_INSTANCE_TYPE', got '$updated_instance_type'."
+            exit 1
+          fi
+
+          {
+            echo "changed=true"
+            echo "updated_instance_type=$updated_instance_type"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Skip update when render.yaml already equals desired
         if: steps.window.outputs.exists == 'true' && steps.window.outputs.phase != 'before' && steps.blueprint_current.outputs.current_instance_type == steps.window.outputs.desired_instance_type
@@ -385,6 +513,9 @@ jobs:
           CURRENT_INSTANCE_TYPE: ${{ steps.blueprint_current.outputs.current_instance_type }}
           CHANGED: ${{ steps.update.outputs.changed }}
           UPDATED_INSTANCE_TYPE: ${{ steps.update.outputs.updated_instance_type }}
+          RENDER_CURRENT_INSTANCE_TYPE: ${{ steps.render_current.outputs.current_instance_type }}
+          RENDER_CHANGED: ${{ steps.render_update.outputs.changed }}
+          RENDER_UPDATED_INSTANCE_TYPE: ${{ steps.render_update.outputs.updated_instance_type }}
         run: |
           if [ "$EXISTS" != "true" ]; then
             echo "No active instance window."
@@ -395,11 +526,17 @@ jobs:
           echo "Phase: $PHASE"
           echo "Window epoch range: $START_EPOCH -> $END_EPOCH ($TIMEZONE)"
           echo "Current render.yaml instance type before update check: $CURRENT_INSTANCE_TYPE"
+          echo "Current Render instance type before update check: $RENDER_CURRENT_INSTANCE_TYPE"
           echo "Desired instance type: $DESIRED_INSTANCE_TYPE"
 
           if [ "$CHANGED" = "true" ]; then
             echo "Updated render.yaml instance type to: $UPDATED_INSTANCE_TYPE"
-            echo "Next step: manually run Blueprint sync in Render dashboard to apply this to live services."
           else
             echo "No render.yaml update needed."
+          fi
+
+          if [ "$RENDER_CHANGED" = "true" ]; then
+            echo "Updated Render service instance type directly to: $RENDER_UPDATED_INSTANCE_TYPE"
+          else
+            echo "No direct Render API update needed."
           fi
