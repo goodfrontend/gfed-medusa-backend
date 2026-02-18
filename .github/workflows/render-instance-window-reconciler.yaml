@@ -1,0 +1,357 @@
+name: Reconcile Render Instance Window
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: render-instance-window-reconciler
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile Render instance type
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Load stored instance window
+        id: window
+        run: |
+          set -euo pipefail
+
+          variable_name="RENDER_INSTANCE_WINDOW_B64"
+          variable_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/variables/$variable_name"
+
+          response=$(curl -sS -w "\n%{http_code}" \
+            "$variable_url" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json")
+
+          body=$(echo "$response" | head -n -1)
+          status=$(echo "$response" | tail -n 1)
+
+          if [ "$status" = "404" ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No active instance window found."
+            exit 0
+          fi
+
+          if [ "$status" -ge 300 ]; then
+            echo "::error::Failed to read repository variable ($status): $body"
+            exit 1
+          fi
+
+          encoded=$(echo "$body" | jq -r '.value // empty')
+          if [ -z "$encoded" ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Window variable is empty. Nothing to reconcile."
+            exit 0
+          fi
+
+          if ! window_json=$(printf '%s' "$encoded" | base64 -d 2>/dev/null); then
+            echo "::error::Stored window value is not valid base64."
+            exit 1
+          fi
+
+          echo "$window_json" | jq -e . >/dev/null
+
+          service_name=$(echo "$window_json" | jq -r '.service_name // empty')
+          target_instance_type=$(echo "$window_json" | jq -r '.target_instance_type // empty')
+          original_instance_type=$(echo "$window_json" | jq -r '.original_instance_type // empty')
+          start_epoch=$(echo "$window_json" | jq -r '.start_epoch // empty')
+          end_epoch=$(echo "$window_json" | jq -r '.end_epoch // empty')
+          timezone=$(echo "$window_json" | jq -r '.timezone // empty')
+
+          if [ -z "$service_name" ] || [ -z "$target_instance_type" ] || [ -z "$original_instance_type" ] || [ -z "$start_epoch" ] || [ -z "$end_epoch" ]; then
+            echo "::error::Stored window payload is missing required fields: $window_json"
+            exit 1
+          fi
+
+          if [ "$start_epoch" -gt "$end_epoch" ]; then
+            echo "::error::Stored window has invalid epoch range: $start_epoch > $end_epoch"
+            exit 1
+          fi
+
+          now_epoch=$(date -u +%s)
+          clear_window=false
+
+          if [ "$now_epoch" -lt "$start_epoch" ]; then
+            phase="before"
+            desired_instance_type=""
+          elif [ "$now_epoch" -le "$end_epoch" ]; then
+            phase="during"
+            desired_instance_type="$target_instance_type"
+          else
+            phase="after"
+            desired_instance_type="$original_instance_type"
+            clear_window=true
+          fi
+
+          {
+            echo "exists=true"
+            echo "service_name=$service_name"
+            echo "target_instance_type=$target_instance_type"
+            echo "original_instance_type=$original_instance_type"
+            echo "desired_instance_type=$desired_instance_type"
+            echo "start_epoch=$start_epoch"
+            echo "end_epoch=$end_epoch"
+            echo "timezone=$timezone"
+            echo "phase=$phase"
+            echo "clear_window=$clear_window"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Ensure run is on default branch
+        if: steps.window.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::Run this workflow on the default branch ($DEFAULT_BRANCH). Current branch: $GITHUB_REF_NAME"
+            exit 1
+          fi
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+      - name: Validate service is still defined in render.yaml
+        if: steps.window.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          service_name = os.environ["SERVICE_NAME"]
+          found = False
+
+          with open("render.yaml", "r", encoding="utf-8") as fh:
+              for raw_line in fh:
+                  line = raw_line.strip()
+                  match = re.match(r"^name:\s*(\S+)$", line)
+                  if match and match.group(1) == service_name:
+                      found = True
+                      break
+
+          if not found:
+              print(f"::error::Service '{service_name}' is no longer present in render.yaml.")
+              sys.exit(1)
+          PY
+        env:
+          SERVICE_NAME: ${{ steps.window.outputs.service_name }}
+
+      - name: Read current instance type from render.yaml
+        id: blueprint_current
+        if: steps.window.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          service_name = os.environ["SERVICE_NAME"]
+          output_path = os.environ["GITHUB_OUTPUT"]
+
+          services = {}
+          in_web_service = False
+          current_plan = None
+
+          with open("render.yaml", "r", encoding="utf-8") as fh:
+              for raw_line in fh:
+                  line = raw_line.strip()
+                  if not line:
+                      continue
+
+                  type_match = re.match(r"^- type:\s*(\S+)$", line)
+                  if type_match:
+                      in_web_service = type_match.group(1) == "web"
+                      current_plan = None
+                      continue
+
+                  if not in_web_service:
+                      continue
+
+                  plan_match = re.match(r"^plan:\s*(\S+)$", line)
+                  if plan_match:
+                      current_plan = plan_match.group(1)
+                      continue
+
+                  name_match = re.match(r"^name:\s*(\S+)$", line)
+                  if name_match:
+                      services[name_match.group(1)] = current_plan
+                      in_web_service = False
+                      current_plan = None
+
+          current = services.get(service_name)
+          if not current:
+              print(f"::error::Could not find current plan in render.yaml for service '{service_name}'.")
+              sys.exit(1)
+
+          with open(output_path, "a", encoding="utf-8") as fh:
+              fh.write(f"current_instance_type={current}\n")
+          PY
+        env:
+          SERVICE_NAME: ${{ steps.window.outputs.service_name }}
+
+      - name: Skip action before start window
+        if: steps.window.outputs.exists == 'true' && steps.window.outputs.phase == 'before'
+        run: |
+          echo "Current time is before the configured start time. No render.yaml change will be applied yet."
+
+      - name: Skip update when render.yaml already equals desired
+        if: steps.window.outputs.exists == 'true' && steps.window.outputs.phase != 'before' && steps.blueprint_current.outputs.current_instance_type == steps.window.outputs.desired_instance_type
+        run: |
+          echo "render.yaml already matches desired instance type for this phase. Skipping commit."
+
+      - name: Update render.yaml instance type
+        id: update
+        if: steps.window.outputs.exists == 'true' && steps.window.outputs.phase != 'before' && steps.blueprint_current.outputs.current_instance_type != steps.window.outputs.desired_instance_type
+        env:
+          SERVICE_NAME: ${{ steps.window.outputs.service_name }}
+          DESIRED_INSTANCE_TYPE: ${{ steps.window.outputs.desired_instance_type }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          service_name = os.environ["SERVICE_NAME"]
+          desired = os.environ["DESIRED_INSTANCE_TYPE"]
+          path = "render.yaml"
+
+          with open(path, "r", encoding="utf-8") as fh:
+              lines = fh.readlines()
+
+          service_name_idx = None
+          for idx, line in enumerate(lines):
+              if re.match(rf"^\s*name:\s*{re.escape(service_name)}\s*$", line.strip()):
+                  service_name_idx = idx
+                  break
+
+          if service_name_idx is None:
+              print(f"::error::Service '{service_name}' not found in render.yaml.")
+              sys.exit(1)
+
+          block_start = None
+          for idx in range(service_name_idx - 1, -1, -1):
+              if re.match(r"^\s*-\s*type:\s*\S+\s*$", lines[idx].strip()):
+                  block_start = idx
+                  break
+
+          if block_start is None:
+              print(f"::error::Could not determine service block for '{service_name}' in render.yaml.")
+              sys.exit(1)
+
+          block_indent = len(lines[block_start]) - len(lines[block_start].lstrip(" "))
+          block_end = len(lines)
+          for idx in range(block_start + 1, len(lines)):
+              stripped = lines[idx].lstrip(" ")
+              indent = len(lines[idx]) - len(stripped)
+              if indent == block_indent and re.match(r"^-\s*type:\s*\S+\s*$", stripped.strip()):
+                  block_end = idx
+                  break
+
+          plan_idx = None
+          for idx in range(block_start + 1, block_end):
+              if re.match(r"^\s*plan:\s*\S+\s*$", lines[idx].strip()):
+                  plan_idx = idx
+                  break
+
+          if plan_idx is None:
+              print(f"::error::Could not find 'plan' field for service '{service_name}' in render.yaml.")
+              sys.exit(1)
+
+          original_line = lines[plan_idx]
+          lines[plan_idx] = re.sub(
+              r"^(\s*plan:\s*)\S+(\s*)$",
+              rf"\1{desired}\2",
+              original_line.rstrip("\n"),
+          ) + "\n"
+
+          with open(path, "w", encoding="utf-8") as fh:
+              fh.writelines(lines)
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add render.yaml
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "updated_instance_type=${{ steps.blueprint_current.outputs.current_instance_type }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          phase="${{ steps.window.outputs.phase }}"
+          git commit -m "chore(render): set ${SERVICE_NAME} plan to ${DESIRED_INSTANCE_TYPE} (${phase} window)"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "updated_instance_type=$DESIRED_INSTANCE_TYPE" >> "$GITHUB_OUTPUT"
+
+      - name: Clear stored window after end time
+        if: steps.window.outputs.exists == 'true' && steps.window.outputs.clear_window == 'true'
+        run: |
+          set -euo pipefail
+
+          variable_name="RENDER_INSTANCE_WINDOW_B64"
+          response=$(curl -sS -w "\n%{http_code}" -X DELETE \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/variables/$variable_name" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json")
+
+          body=$(echo "$response" | head -n -1)
+          status=$(echo "$response" | tail -n 1)
+
+          if [ "$status" -ge 300 ]; then
+            echo "::error::Failed to clear window variable ($status): $body"
+            exit 1
+          fi
+
+          echo "Window finished. Original instance type restored and stored window cleared."
+
+      - name: Print reconciliation summary
+        if: always()
+        env:
+          EXISTS: ${{ steps.window.outputs.exists }}
+          SERVICE_NAME: ${{ steps.window.outputs.service_name }}
+          PHASE: ${{ steps.window.outputs.phase }}
+          START_EPOCH: ${{ steps.window.outputs.start_epoch }}
+          END_EPOCH: ${{ steps.window.outputs.end_epoch }}
+          TIMEZONE: ${{ steps.window.outputs.timezone }}
+          DESIRED_INSTANCE_TYPE: ${{ steps.window.outputs.desired_instance_type }}
+          CURRENT_INSTANCE_TYPE: ${{ steps.blueprint_current.outputs.current_instance_type }}
+          CHANGED: ${{ steps.update.outputs.changed }}
+          UPDATED_INSTANCE_TYPE: ${{ steps.update.outputs.updated_instance_type }}
+        run: |
+          if [ "$EXISTS" != "true" ]; then
+            echo "No active instance window."
+            exit 0
+          fi
+
+          echo "Service: $SERVICE_NAME"
+          echo "Phase: $PHASE"
+          echo "Window epoch range: $START_EPOCH -> $END_EPOCH ($TIMEZONE)"
+          echo "Current render.yaml instance type before update check: $CURRENT_INSTANCE_TYPE"
+          echo "Desired instance type: $DESIRED_INSTANCE_TYPE"
+
+          if [ "$CHANGED" = "true" ]; then
+            echo "Updated render.yaml instance type to: $UPDATED_INSTANCE_TYPE"
+            echo "Next step: manually run Blueprint sync in Render dashboard to apply this to live services."
+          else
+            echo "No render.yaml update needed."
+          fi
