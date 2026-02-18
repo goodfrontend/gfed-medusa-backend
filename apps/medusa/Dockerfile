@@ -2,6 +2,9 @@
 
 FROM node:20-bookworm-slim AS base
 
+# Update system packages to fix vulnerabilities
+RUN apt-get update && apt-get upgrade -y && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 ENV PNPM_HOME="/pnpm" \
     PATH="$PNPM_HOME:$PATH"
 

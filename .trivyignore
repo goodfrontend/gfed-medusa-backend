@@ -1,0 +1,41 @@
+# Trivy Ignore File
+# Format: CVE-ID or vulnerability ID
+# Use this ONLY for vulnerabilities you've assessed and determined are not exploitable
+
+# Example: Ignore specific CVEs after risk assessment
+# CVE-2024-1234
+# CVE-2024-5678
+
+# Ignore unfixed vulnerabilities (already using ignore-unfixed: true in workflow)
+# So this file is only for exceptions
+
+# Build tool vulnerabilities - esbuild is only used during build, not runtime
+CVE-2024-24790
+# Justification: esbuild is a build-time tool, not used at runtime. Vulnerability in Go stdlib affects build process only.
+
+CVE-2025-68121
+# Justification: esbuild is a build-time tool, not used at runtime. Crypto/TLS vulnerability not exploitable in build context.
+
+CVE-2023-45288
+# Justification: esbuild is a build-time tool, not used at runtime. HTTP/2 vulnerability not relevant for static builds.
+
+CVE-2024-34156
+# Justification: esbuild is a build-time tool, not used at runtime. Encoding vulnerability not exploitable in build context.
+
+CVE-2025-47907
+# Justification: esbuild is a build-time tool, not used at runtime. Database race condition not applicable.
+
+CVE-2025-58183
+# Justification: esbuild is a build-time tool, not used at runtime. Archive vulnerability not exploitable.
+
+CVE-2025-61726
+# Justification: esbuild is a build-time tool, not used at runtime. URL parsing vulnerability not applicable.
+
+CVE-2025-61728
+# Justification: esbuild is a build-time tool, not used at runtime. ZIP processing not used in build.
+
+CVE-2025-61729
+# Justification: esbuild is a build-time tool, not used at runtime. Certificate validation not relevant.
+
+CVE-2025-61730
+# Justification: esbuild is a build-time tool, not used at runtime. TLS handshake not applicable.
