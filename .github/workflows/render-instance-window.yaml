@@ -35,7 +35,7 @@ on:
 
 permissions:
   contents: read
-  actions: write
+  deployments: write
 
 concurrency:
   group: render-instance-window-config
@@ -55,6 +55,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure run is on default branch
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::Run this workflow on the default branch ($DEFAULT_BRANCH). Current branch: $GITHUB_REF_NAME"
+            exit 1
+          fi
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
       - name: Validate schedule inputs and convert to UTC
         id: schedule
@@ -244,7 +256,7 @@ jobs:
 
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
-      - name: Persist instance window in repository variable
+      - name: Persist instance window in deployment state
         if: steps.gate.outputs.skip == 'false'
         id: persist
         env:
@@ -259,8 +271,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          variable_name="RENDER_INSTANCE_WINDOW_B64"
-          api_base="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/variables"
+          state_environment="render-instance-window-state"
           now_epoch=$(date -u +%s)
 
           window_json=$(jq -cn \
@@ -298,72 +309,109 @@ jobs:
             }'
           )
 
-          window_b64=$(printf '%s' "$window_json" | base64 | tr -d '\n')
-          payload=$(jq -cn --arg name "$variable_name" --arg value "$window_b64" '{name: $name, value: $value}')
+          list_response=$(
+            curl -sS -w "\n%{http_code}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments?environment=$state_environment&per_page=1" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json"
+          )
 
-          get_status=$(curl -sS -o /tmp/render_window_var_get.json -w "%{http_code}" \
-            "$api_base/$variable_name" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json")
+          list_body=$(echo "$list_response" | head -n -1)
+          list_status=$(echo "$list_response" | tail -n 1)
 
-          if [ "$get_status" = "200" ]; then
-            save_response=$(
-              curl -sS -w "\n%{http_code}" -X PATCH "$api_base/$variable_name" \
-                -H "Authorization: Bearer $GITHUB_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                -H "Content-Type: application/json" \
-                -d "$payload"
-            )
-            action_word="updated"
-          elif [ "$get_status" = "404" ]; then
-            save_response=$(
-              curl -sS -w "\n%{http_code}" -X POST "$api_base" \
-                -H "Authorization: Bearer $GITHUB_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                -H "Content-Type: application/json" \
-                -d "$payload"
-            )
-            action_word="created"
-          else
-            echo "::error::Unable to read repository variable ($get_status): $(cat /tmp/render_window_var_get.json)"
+          if [ "$list_status" -ge 300 ]; then
+            echo "::error::Unable to list deployments ($list_status): $list_body"
             exit 1
           fi
 
-          save_status=$(echo "$save_response" | tail -n 1)
-          save_body=$(echo "$save_response" | head -n -1)
+          existing_deployment_id=$(echo "$list_body" | jq -r '.[0].id // empty')
+          if [ -n "$existing_deployment_id" ]; then
+            inactivate_payload=$(jq -cn --arg description "Superseded by workflow run ${GITHUB_RUN_ID}" '{state: "inactive", description: $description, auto_inactive: false}')
+            inactivate_response=$(
+              curl -sS -w "\n%{http_code}" -X POST \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments/$existing_deployment_id/statuses" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
+                -d "$inactivate_payload"
+            )
 
-          if [ "$save_status" -ge 300 ]; then
-            echo "::error::Failed to persist repository variable ($save_status): $save_body"
-            exit 1
+            inactivate_body=$(echo "$inactivate_response" | head -n -1)
+            inactivate_status=$(echo "$inactivate_response" | tail -n 1)
+
+            if [ "$inactivate_status" -ge 300 ]; then
+              echo "::warning::Failed to inactivate previous deployment state ($inactivate_status): $inactivate_body"
+            fi
           fi
 
-          echo "variable_action=$action_word" >> "$GITHUB_OUTPUT"
+          create_payload=$(jq -cn \
+            --arg ref "$GITHUB_SHA" \
+            --arg environment "$state_environment" \
+            --arg description "Render instance window state" \
+            --arg task "render-instance-window-state" \
+            --argjson payload "$window_json" \
+            '{
+              ref: $ref,
+              auto_merge: false,
+              required_contexts: [],
+              environment: $environment,
+              description: $description,
+              task: $task,
+              payload: $payload
+            }'
+          )
 
-      - name: Trigger immediate reconciliation
-        if: steps.gate.outputs.skip == 'false'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-
-          dispatch_payload=$(jq -cn --arg ref "$DEFAULT_BRANCH" '{ref: $ref}')
-          dispatch_response=$(
+          create_response=$(
             curl -sS -w "\n%{http_code}" -X POST \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/render-instance-window-reconciler.yaml/dispatches" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments" \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               -H "Content-Type: application/json" \
-              -d "$dispatch_payload"
+              -d "$create_payload"
           )
 
-          dispatch_status=$(echo "$dispatch_response" | tail -n 1)
-          dispatch_body=$(echo "$dispatch_response" | head -n -1)
+          create_body=$(echo "$create_response" | head -n -1)
+          create_status=$(echo "$create_response" | tail -n 1)
 
-          if [ "$dispatch_status" -ge 300 ]; then
-            echo "::error::Failed to dispatch reconciler workflow ($dispatch_status): $dispatch_body"
+          if [ "$create_status" -ge 300 ]; then
+            echo "::error::Failed to create deployment state ($create_status): $create_body"
             exit 1
           fi
+
+          state_deployment_id=$(echo "$create_body" | jq -r '.id // empty')
+          if [ -z "$state_deployment_id" ]; then
+            echo "::error::Deployment state response did not include deployment id: $create_body"
+            exit 1
+          fi
+
+          status_payload=$(jq -cn --arg description "Window scheduled by ${GITHUB_ACTOR}" '{state: "in_progress", description: $description, auto_inactive: false}')
+          status_response=$(
+            curl -sS -w "\n%{http_code}" -X POST \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments/$state_deployment_id/statuses" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "$status_payload"
+          )
+
+          status_body=$(echo "$status_response" | head -n -1)
+          status_code=$(echo "$status_response" | tail -n 1)
+
+          if [ "$status_code" -ge 300 ]; then
+            echo "::error::Failed to mark deployment state active ($status_code): $status_body"
+            exit 1
+          fi
+
+          if [ -n "$existing_deployment_id" ]; then
+            action_word="updated"
+          else
+            action_word="created"
+          fi
+
+          {
+            echo "action_word=$action_word"
+            echo "deployment_id=$state_deployment_id"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Print summary
         if: always()
@@ -374,7 +422,8 @@ jobs:
           START_UTC: ${{ steps.schedule.outputs.start_utc }}
           END_UTC: ${{ steps.schedule.outputs.end_utc }}
           BLUEPRINT_PLAN: ${{ steps.blueprint.outputs.blueprint_plan }}
-          VARIABLE_ACTION: ${{ steps.persist.outputs.variable_action }}
+          STATE_ACTION: ${{ steps.persist.outputs.action_word }}
+          STATE_DEPLOYMENT_ID: ${{ steps.persist.outputs.deployment_id }}
         run: |
           echo "Service: $TARGET_SERVICE_NAME"
           echo "Current instance type: $CURRENT_INSTANCE_TYPE"
@@ -386,7 +435,8 @@ jobs:
             exit 0
           fi
 
-          echo "Window variable $VARIABLE_ACTION."
+          echo "State deployment #$STATE_DEPLOYMENT_ID $STATE_ACTION."
           echo "Scheduled UTC window: $START_UTC -> $END_UTC"
           echo "Reconciler will update render.yaml to '$TARGET_INSTANCE_TYPE' during the window and back to '$CURRENT_INSTANCE_TYPE' after end."
-          echo "Live Render services change only after you manually trigger Blueprint sync in Render dashboard."
+          echo "Reconciler runs every 5 minutes; next run applies changes to render.yaml when the window phase changes."
+          echo "After each render.yaml change commit, manually run Blueprint sync in Render dashboard to apply live."

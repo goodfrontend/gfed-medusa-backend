@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: write
-  actions: write
+  deployments: write
 
 concurrency:
   group: render-instance-window-reconciler
@@ -30,37 +30,73 @@ jobs:
         run: |
           set -euo pipefail
 
-          variable_name="RENDER_INSTANCE_WINDOW_B64"
-          variable_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/variables/$variable_name"
+          state_environment="render-instance-window-state"
+          list_response=$(
+            curl -sS -w "\n%{http_code}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments?environment=$state_environment&per_page=20" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json"
+          )
 
-          response=$(curl -sS -w "\n%{http_code}" \
-            "$variable_url" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json")
+          list_body=$(echo "$list_response" | head -n -1)
+          list_status=$(echo "$list_response" | tail -n 1)
 
-          body=$(echo "$response" | head -n -1)
-          status=$(echo "$response" | tail -n 1)
+          if [ "$list_status" -ge 300 ]; then
+            echo "::error::Unable to list deployments ($list_status): $list_body"
+            exit 1
+          fi
 
-          if [ "$status" = "404" ]; then
+          deployments_count=$(echo "$list_body" | jq 'length')
+          if [ "$deployments_count" -eq 0 ]; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "No active instance window found."
             exit 0
           fi
 
-          if [ "$status" -ge 300 ]; then
-            echo "::error::Failed to read repository variable ($status): $body"
-            exit 1
-          fi
+          active_deployment=""
+          active_deployment_id=""
+          while IFS= read -r deployment; do
+            deployment_id=$(echo "$deployment" | jq -r '.id // empty')
+            [ -z "$deployment_id" ] && continue
 
-          encoded=$(echo "$body" | jq -r '.value // empty')
-          if [ -z "$encoded" ]; then
+            status_response=$(
+              curl -sS -w "\n%{http_code}" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments/$deployment_id/statuses?per_page=1" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json"
+            )
+
+            status_body=$(echo "$status_response" | head -n -1)
+            status_code=$(echo "$status_response" | tail -n 1)
+
+            if [ "$status_code" -ge 300 ]; then
+              echo "::error::Unable to read deployment status for id $deployment_id ($status_code): $status_body"
+              exit 1
+            fi
+
+            latest_state=$(echo "$status_body" | jq -r '.[0].state // "unknown"')
+            if [ "$latest_state" != "inactive" ]; then
+              active_deployment="$deployment"
+              active_deployment_id="$deployment_id"
+              break
+            fi
+          done < <(echo "$list_body" | jq -c '.[]')
+
+          if [ -z "$active_deployment_id" ]; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Window variable is empty. Nothing to reconcile."
+            echo "No active instance window found."
             exit 0
           fi
 
-          if ! window_json=$(printf '%s' "$encoded" | base64 -d 2>/dev/null); then
-            echo "::error::Stored window value is not valid base64."
+          window_json=$(echo "$active_deployment" | jq -c '.payload // empty')
+          if [ -z "$window_json" ] || [ "$window_json" = "null" ]; then
+            echo "::error::Active deployment state has empty payload."
+            exit 1
+          fi
+
+          window_json=$(echo "$window_json" | jq -c 'if type=="string" then (try fromjson catch empty) else . end')
+          if [ -z "$window_json" ] || [ "$window_json" = "null" ]; then
+            echo "::error::Could not parse deployment payload as JSON state."
             exit 1
           fi
 
@@ -100,6 +136,7 @@ jobs:
 
           {
             echo "exists=true"
+            echo "state_deployment_id=$active_deployment_id"
             echo "service_name=$service_name"
             echo "target_instance_type=$target_instance_type"
             echo "original_instance_type=$original_instance_type"
@@ -305,24 +342,35 @@ jobs:
 
       - name: Clear stored window after end time
         if: steps.window.outputs.exists == 'true' && steps.window.outputs.clear_window == 'true'
+        env:
+          STATE_DEPLOYMENT_ID: ${{ steps.window.outputs.state_deployment_id }}
         run: |
           set -euo pipefail
 
-          variable_name="RENDER_INSTANCE_WINDOW_B64"
-          response=$(curl -sS -w "\n%{http_code}" -X DELETE \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/variables/$variable_name" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json")
+          if [ -z "$STATE_DEPLOYMENT_ID" ]; then
+            echo "State deployment already cleared."
+            exit 0
+          fi
 
-          body=$(echo "$response" | head -n -1)
-          status=$(echo "$response" | tail -n 1)
+          payload=$(jq -cn --arg description "Window finished by run ${GITHUB_RUN_ID}" '{state: "inactive", description: $description, auto_inactive: false}')
+          close_response=$(
+            curl -sS -w "\n%{http_code}" -X POST \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments/$STATE_DEPLOYMENT_ID/statuses" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "$payload"
+          )
 
-          if [ "$status" -ge 300 ]; then
-            echo "::error::Failed to clear window variable ($status): $body"
+          close_body=$(echo "$close_response" | head -n -1)
+          close_status=$(echo "$close_response" | tail -n 1)
+
+          if [ "$close_status" -ge 300 ]; then
+            echo "::error::Failed to inactivate state deployment ($close_status): $close_body"
             exit 1
           fi
 
-          echo "Window finished. Original instance type restored and stored window cleared."
+          echo "Window finished. Original instance type restored in render.yaml and state deployment inactivated."
 
       - name: Print reconciliation summary
         if: always()
