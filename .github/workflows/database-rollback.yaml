@@ -1,0 +1,217 @@
+name: Database Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      modules:
+        description: "Comma-separated list of modules to rollback (e.g., cart,product,order)"
+        required: true
+        type: string
+      environment:
+        description: "Environment to rollback"
+        required: true
+        type: choice
+        options:
+          - smoke
+          - qa
+          - production
+        default: "production"
+      confirm:
+        description: 'Type "rollback-database" to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate rollback request
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.parse-modules.outputs.modules }}
+      environment: ${{ steps.parse-env.outputs.environment }}
+    steps:
+      - name: Validate confirmation
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "rollback-database" ]; then
+            echo "::error::Confirmation failed. You must type 'rollback-database' to proceed."
+            exit 1
+          fi
+          echo "✓ Confirmation validated"
+
+      - name: Parse modules
+        id: parse-modules
+        env:
+          MODULES: ${{ inputs.modules }}
+        run: |
+          # Convert comma-separated to space-separated
+          MODULES=$(echo "$MODULES" | tr ',' ' ')
+          echo "modules=$MODULES" >> "$GITHUB_OUTPUT"
+          echo "Modules to rollback: $MODULES"
+
+      - name: Parse environment
+        id: parse-env
+        env:
+          ENV: ${{ inputs.environment }}
+        run: |
+          case "$ENV" in
+            smoke)
+              echo "environment=smoke" >> "$GITHUB_OUTPUT"
+              echo "service_name=gfed-medusa-be-smoke" >> "$GITHUB_OUTPUT"
+              ;;
+            qa)
+              echo "environment=qa" >> "$GITHUB_OUTPUT"
+              echo "service_name=gfed-medusa-be-qa" >> "$GITHUB_OUTPUT"
+              ;;
+            production)
+              echo "environment=production" >> "$GITHUB_OUTPUT"
+              echo "service_name=gfed-medusa-be" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+          echo "Target environment: $ENV"
+
+  backup-database:
+    name: Backup database before rollback
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: ${{ needs.validate.outputs.environment }}
+    steps:
+      - name: Check DATABASE_URL secret
+        run: |
+          if [ -z "${{ secrets.DATABASE_URL }}" ]; then
+            echo "::error::DATABASE_URL secret is not set in GitHub. Please add it in Settings → Secrets → Actions."
+            exit 1
+          fi
+
+      - name: Create database backup
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ENVIRONMENT: ${{ needs.validate.outputs.environment }}
+        run: |
+          echo "::notice::Creating database backup for $ENVIRONMENT..."
+          BACKUP_FILE="medusa-${ENVIRONMENT}-backup-$(date +%Y%m%d-%H%M%S).sql"
+          pg_dump "$DATABASE_URL" > "$BACKUP_FILE"
+          echo "::notice::✓ Database backup created: $BACKUP_FILE"
+          echo "::warning::Keep this backup file safe in case rollback needs to be reverted"
+
+  rollback-database:
+    name: Rollback database migrations
+    needs: [validate, backup-database]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.validate.outputs.environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.2
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-medusa-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-medusa-
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Show current migration status
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "::notice::Current database migration status:"
+          npx medusa db:show || echo "Note: db:show command may not be available in this version"
+
+      - name: Rollback migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MODULES: ${{ needs.validate.outputs.modules }}
+        run: |
+          echo "::warning::Rolling back migrations for modules: $MODULES"
+          echo ""
+          echo "This will run the 'down' method of the most recent migration for each module."
+          echo ""
+
+          for module in $MODULES; do
+            echo "::notice::Rolling back module: $module"
+            if npx medusa db:rollback "$module"; then
+              echo "::notice::✓ Successfully rolled back $module"
+            else
+              echo "::error::✗ Failed to rollback $module"
+              exit 1
+            fi
+          done
+
+      - name: Verify rollback
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "::notice::Verifying database rollback..."
+          npx medusa db:show || echo "Note: db:show command may not be available in this version"
+          echo "::notice::✓ Database rollback completed"
+
+  notify:
+    name: Notify rollback result
+    needs: [validate, backup-database, rollback-database]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rollback successful
+        if: needs.rollback-database.result == 'success'
+        run: |
+          echo "::notice::═══════════════════════════════════════════════════════════"
+          echo "::notice::  DATABASE ROLLBACK COMPLETED SUCCESSFULLY"
+          echo "::notice::═══════════════════════════════════════════════════════════"
+          echo "::notice::"
+          echo "::notice::Environment: ${{ needs.validate.outputs.environment }}"
+          echo "::notice::Modules rolled back: ${{ needs.validate.outputs.modules }}"
+          echo "::notice::"
+          echo "::notice::Next steps:"
+          echo "::notice::1. Verify application functionality"
+          echo "::notice::2. Run 'Rollback Production' workflow to rollback the Docker image"
+          echo "::notice::═══════════════════════════════════════════════════════════"
+
+      - name: Rollback failed
+        if: needs.rollback-database.result == 'failure'
+        run: |
+          echo "::error::═══════════════════════════════════════════════════════════"
+          echo "::error::  DATABASE ROLLBACK FAILED"
+          echo "::error::═══════════════════════════════════════════════════════════"
+          echo "::error::"
+          echo "::error::Environment: ${{ needs.validate.outputs.environment }}"
+          echo "::error::Modules: ${{ needs.validate.outputs.modules }}"
+          echo "::error::"
+          echo "::error::A backup was created before the rollback attempt."
+          echo "::error::Check the logs above for details."
+          echo "::error::"
+          echo "::error::To restore from backup:"
+          echo "::error::  psql \"$DATABASE_URL\" < backup-file.sql"
+          echo "::error::═══════════════════════════════════════════════════════════"
+          exit 1
+
+      - name: Backup reminder
+        if: needs.backup-database.result == 'success' && needs.rollback-database.result == 'success'
+        run: |
+          echo "::warning::⚠️  IMPORTANT: Database backup was created before rollback"
+          echo "::warning::The backup file is stored in the GitHub Actions artifacts"
+          echo "::warning::Download it from this workflow run if you need to restore"

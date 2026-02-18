@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   packages: write
   deployments: write
 
@@ -87,3 +87,68 @@ jobs:
       image: ${{ needs.build.outputs.image_tag }}
     secrets:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+
+  create-tags:
+    name: Create production tags
+    needs: [detect-changes, build, deploy-smoke, deploy-qa, deploy-prod]
+    if: |
+      always() &&
+      needs.deploy-prod.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read service version
+        id: version
+        run: |
+          MEDUSA_VERSION=$(jq -r '.version' apps/medusa/package.json)
+
+          if [ -z "$MEDUSA_VERSION" ] || [ "$MEDUSA_VERSION" = "null" ]; then
+            echo "::error::Invalid version in medusa package.json: '$MEDUSA_VERSION'"
+            exit 1
+          fi
+
+          if ! echo "$MEDUSA_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::Version '$MEDUSA_VERSION' for medusa is not valid semver (must be X.Y.Z)"
+            exit 1
+          fi
+
+          echo "medusa=$MEDUSA_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create git tag for deployed service
+        env:
+          MEDUSA_VERSION: ${{ steps.version.outputs.medusa }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          VERSION="$MEDUSA_VERSION"
+          TAG="medusa@$VERSION"
+
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git tag -a "$TAG" -m "Production release $TAG"
+
+            if git push origin "$TAG"; then
+              echo "✓ Created tag: $TAG"
+            else
+              echo "::error::Failed to push tag: $TAG"
+              exit 1
+            fi
+          else
+            TAG_COMMIT=$(git rev-list -n 1 "$TAG" 2>/dev/null)
+            CURRENT_COMMIT=$(git rev-parse HEAD)
+
+            if [ "$TAG_COMMIT" = "$CURRENT_COMMIT" ]; then
+              echo "⚠ Tag $TAG already exists for this commit (idempotent deployment)"
+            else
+              echo "::error::Tag $TAG already exists but points to different commit"
+              echo "::error::Current commit: $CURRENT_COMMIT"
+              echo "::error::Tag points to:  $TAG_COMMIT"
+              echo "::error::Please bump the version in apps/medusa/package.json before deploying"
+              exit 1
+            fi
+          fi
