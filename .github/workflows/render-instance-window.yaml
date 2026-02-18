@@ -261,7 +261,7 @@ jobs:
         if: steps.gate.outputs.skip == 'false'
         id: persist
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           START_EPOCH: ${{ steps.schedule.outputs.start_epoch }}
           END_EPOCH: ${{ steps.schedule.outputs.end_epoch }}
           START_UTC: ${{ steps.schedule.outputs.start_utc }}
@@ -312,7 +312,7 @@ jobs:
 
           list_response=$(
             curl -sS -w "\n%{http_code}" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments?environment=$state_environment&per_page=1" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments?environment=$state_environment&per_page=50" \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
               -H "Accept: application/vnd.github+json"
           )
@@ -325,12 +325,35 @@ jobs:
             exit 1
           fi
 
-          existing_deployment_id=$(echo "$list_body" | jq -r '.[0].id // empty')
-          if [ -n "$existing_deployment_id" ]; then
+          existing_deployment_id=""
+          while IFS= read -r deployment_id; do
+            [ -z "$deployment_id" ] && continue
+            [ -z "$existing_deployment_id" ] && existing_deployment_id="$deployment_id"
+
+            status_response=$(
+              curl -sS -w "\n%{http_code}" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments/$deployment_id/statuses?per_page=1" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json"
+            )
+
+            status_body=$(echo "$status_response" | head -n -1)
+            status_code=$(echo "$status_response" | tail -n 1)
+
+            if [ "$status_code" -ge 300 ]; then
+              echo "::warning::Unable to read status for deployment $deployment_id ($status_code): $status_body"
+              continue
+            fi
+
+            latest_state=$(echo "$status_body" | jq -r '.[0].state // "unknown"')
+            if [ "$latest_state" = "inactive" ]; then
+              continue
+            fi
+
             inactivate_payload=$(jq -cn --arg description "Superseded by workflow run ${GITHUB_RUN_ID}" '{state: "inactive", description: $description, auto_inactive: false}')
             inactivate_response=$(
               curl -sS -w "\n%{http_code}" -X POST \
-                "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments/$existing_deployment_id/statuses" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/deployments/$deployment_id/statuses" \
                 -H "Authorization: Bearer $GITHUB_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
                 -H "Content-Type: application/json" \
@@ -341,9 +364,9 @@ jobs:
             inactivate_status=$(echo "$inactivate_response" | tail -n 1)
 
             if [ "$inactivate_status" -ge 300 ]; then
-              echo "::warning::Failed to inactivate previous deployment state ($inactivate_status): $inactivate_body"
+              echo "::warning::Failed to inactivate previous deployment state $deployment_id ($inactivate_status): $inactivate_body"
             fi
-          fi
+          done < <(echo "$list_body" | jq -r '.[] | select(.task == "render-instance-window-state") | .id')
 
           create_payload=$(jq -cn \
             --arg ref "$GITHUB_SHA" \
@@ -417,10 +440,15 @@ jobs:
       - name: Trigger immediate reconciler run
         if: steps.gate.outputs.skip == 'false'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
+
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            echo "::warning::github.token is unavailable in this run. Skipping immediate reconciler dispatch."
+            exit 0
+          fi
 
           dispatch_payload=$(jq -cn --arg ref "$DEFAULT_BRANCH" '{ref: $ref}')
           dispatch_response=$(

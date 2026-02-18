@@ -18,7 +18,7 @@ jobs:
     name: Reconcile Render instance type
     runs-on: ubuntu-latest
     env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ github.token }}
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
     steps:
       - name: Checkout repository
@@ -47,7 +47,8 @@ jobs:
             exit 1
           fi
 
-          deployments_count=$(echo "$list_body" | jq 'length')
+          deployments=$(echo "$list_body" | jq -c '[.[] | select(.task == "render-instance-window-state")]')
+          deployments_count=$(echo "$deployments" | jq 'length')
           if [ "$deployments_count" -eq 0 ]; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "No active instance window found."
@@ -81,7 +82,7 @@ jobs:
               active_deployment_id="$deployment_id"
               break
             fi
-          done < <(echo "$list_body" | jq -c '.[]')
+          done < <(echo "$deployments" | jq -c '.[]')
 
           if [ -z "$active_deployment_id" ]; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
