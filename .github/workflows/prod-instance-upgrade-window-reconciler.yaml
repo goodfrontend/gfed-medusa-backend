@@ -1,0 +1,289 @@
+name: Reconcile Prod Instance Upgrade Window
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub's minimum cron interval is 5 minutes.
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: prod-instance-upgrade-window-reconciler
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile gfed-medusa-be instance plan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Load configured upgrade window
+        id: window
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          VAR_NAME="PROD_INSTANCE_UPGRADE_WINDOW"
+          API_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/variables/${VAR_NAME}"
+
+          get_status=$(curl -sS -o /tmp/window_var.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$API_URL")
+
+          if [ "$get_status" = "404" ]; then
+            echo "::notice::No configured upgrade window found (${VAR_NAME} does not exist)."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$get_status" != "200" ]; then
+            echo "::error::Unable to read ${VAR_NAME} (HTTP ${get_status})."
+            cat /tmp/window_var.json
+            exit 1
+          fi
+
+          window_value="$(jq -r '.value // empty' /tmp/window_var.json)"
+          if [ -z "$window_value" ]; then
+            echo "::notice::${VAR_NAME} is empty."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          printf '%s' "$window_value" > window.json
+
+          if ! jq -e . window.json >/dev/null 2>&1; then
+            echo "::error::${VAR_NAME} is not valid JSON."
+            cat window.json
+            exit 1
+          fi
+
+          enabled="$(jq -r '.enabled // true' window.json)"
+          if [ "$enabled" != "true" ]; then
+            echo "::notice::Upgrade window is disabled."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          service_name="$(jq -r '.service_name // empty' window.json)"
+          from_plan="$(jq -r '.from_plan // empty' window.json)"
+          to_plan="$(jq -r '.to_plan // empty' window.json)"
+          start_epoch="$(jq -r '.start_epoch // empty' window.json)"
+          end_epoch="$(jq -r '.end_epoch // empty' window.json)"
+          start_utc="$(jq -r '.start_utc // empty' window.json)"
+          end_utc="$(jq -r '.end_utc // empty' window.json)"
+
+          if [ -z "$service_name" ] || [ -z "$from_plan" ] || [ -z "$to_plan" ] || [ -z "$start_epoch" ] || [ -z "$end_epoch" ]; then
+            echo "::error::${VAR_NAME} is missing required fields."
+            cat window.json
+            exit 1
+          fi
+
+          case "$start_epoch" in
+            (*[!0-9]*|'')
+              echo "::error::start_epoch must be a unix epoch."
+              exit 1
+              ;;
+          esac
+
+          case "$end_epoch" in
+            (*[!0-9]*|'')
+              echo "::error::end_epoch must be a unix epoch."
+              exit 1
+              ;;
+          esac
+
+          now_epoch="$(date -u +%s)"
+          now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          if [ "$now_epoch" -lt "$start_epoch" ]; then
+            phase="before_start"
+            target_plan="$from_plan"
+          elif [ "$now_epoch" -lt "$end_epoch" ]; then
+            phase="inside_window"
+            target_plan="$to_plan"
+          else
+            phase="after_end"
+            target_plan="$from_plan"
+          fi
+
+          echo "::notice::Current phase: ${phase}; target plan: ${target_plan}"
+          {
+            echo "configured=true"
+            echo "service_name=$service_name"
+            echo "target_plan=$target_plan"
+            echo "phase=$phase"
+            echo "from_plan=$from_plan"
+            echo "to_plan=$to_plan"
+            echo "start_utc=$start_utc"
+            echo "end_utc=$end_utc"
+            echo "now_utc=$now_utc"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile Render service plan
+        if: steps.window.outputs.configured == 'true'
+        id: reconcile
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE_NAME: ${{ steps.window.outputs.service_name }}
+          TARGET_PLAN: ${{ steps.window.outputs.target_plan }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RENDER_API_KEY:-}" ]; then
+            echo "::error::Missing required secret RENDER_API_KEY."
+            exit 1
+          fi
+
+          service_resp="$(curl -sS -w "\n%{http_code}" \
+            "https://api.render.com/v1/services?name=${SERVICE_NAME}&limit=1" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Accept: application/json")"
+
+          service_body="$(echo "$service_resp" | head -n -1)"
+          service_status="$(echo "$service_resp" | tail -n 1)"
+
+          if [ "$service_status" -ge 300 ]; then
+            echo "::error::Failed to fetch Render service '${SERVICE_NAME}' (HTTP ${service_status})."
+            echo "$service_body"
+            exit 1
+          fi
+
+          service_data="$(echo "$service_body" | jq -c '.[0].service // empty')"
+          if [ -z "$service_data" ]; then
+            echo "::error::Render service not found: ${SERVICE_NAME}"
+            exit 1
+          fi
+
+          service_id="$(echo "$service_data" | jq -r '.id // empty')"
+          current_plan="$(echo "$service_data" | jq -r '.serviceDetails.plan // .plan // empty')"
+
+          if [ -z "$service_id" ]; then
+            echo "::error::Could not determine service ID for ${SERVICE_NAME}."
+            exit 1
+          fi
+
+          if [ -z "$current_plan" ]; then
+            echo "::error::Could not determine current plan for ${SERVICE_NAME}."
+            echo "$service_data"
+            exit 1
+          fi
+
+          echo "service_id=${service_id}" >> "$GITHUB_OUTPUT"
+          echo "current_plan=${current_plan}" >> "$GITHUB_OUTPUT"
+          echo "target_plan=${TARGET_PLAN}" >> "$GITHUB_OUTPUT"
+
+          if [ "$current_plan" = "$TARGET_PLAN" ]; then
+            echo "::notice::Plan already '${TARGET_PLAN}'. No change needed."
+            echo "plan_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          patch_service() {
+            local payload="$1"
+            local label="$2"
+
+            patch_resp="$(curl -sS -w "\n%{http_code}" \
+              -X PATCH "https://api.render.com/v1/services/${service_id}" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              -d "$payload")"
+
+            patch_body="$(echo "$patch_resp" | head -n -1)"
+            patch_status="$(echo "$patch_resp" | tail -n 1)"
+
+            if [ "$patch_status" -ge 300 ]; then
+              echo "::warning::Patch with ${label} failed (HTTP ${patch_status})."
+              echo "$patch_body"
+              return 1
+            fi
+
+            echo "::notice::Patch with ${label} succeeded."
+            return 0
+          }
+
+          payload_service_details="$(jq -cn --arg plan "$TARGET_PLAN" '{serviceDetails:{plan:$plan}}')"
+          payload_root="$(jq -cn --arg plan "$TARGET_PLAN" '{plan:$plan}')"
+
+          if ! patch_service "$payload_service_details" "serviceDetails.plan"; then
+            patch_service "$payload_root" "plan"
+          fi
+
+          verify_resp="$(curl -sS -w "\n%{http_code}" \
+            "https://api.render.com/v1/services?name=${SERVICE_NAME}&limit=1" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Accept: application/json")"
+
+          verify_body="$(echo "$verify_resp" | head -n -1)"
+          verify_status="$(echo "$verify_resp" | tail -n 1)"
+
+          if [ "$verify_status" -ge 300 ]; then
+            echo "::error::Failed to verify Render service after patch (HTTP ${verify_status})."
+            echo "$verify_body"
+            exit 1
+          fi
+
+          updated_plan="$(echo "$verify_body" | jq -r '.[0].service.serviceDetails.plan // .[0].service.plan // empty')"
+
+          if [ "$updated_plan" != "$TARGET_PLAN" ]; then
+            echo "::error::Plan verification failed. Expected '${TARGET_PLAN}', got '${updated_plan}'."
+            exit 1
+          fi
+
+          echo "::notice::Plan changed from '${current_plan}' to '${updated_plan}'."
+          echo "plan_changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Disable completed window after successful revert
+        if: steps.window.outputs.configured == 'true' && steps.window.outputs.phase == 'after_end'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          VAR_NAME="PROD_INSTANCE_UPGRADE_WINDOW"
+          API_BASE="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/variables"
+          AUTH_HEADER="Authorization: Bearer ${GITHUB_TOKEN}"
+
+          get_status=$(curl -sS -o /tmp/window_get_disable.json -w "%{http_code}" \
+            -H "$AUTH_HEADER" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${API_BASE}/${VAR_NAME}")
+
+          if [ "$get_status" != "200" ]; then
+            echo "::warning::Could not read ${VAR_NAME} to disable it (HTTP ${get_status})."
+            cat /tmp/window_get_disable.json
+            exit 0
+          fi
+
+          value="$(jq -r '.value // empty' /tmp/window_get_disable.json)"
+          if [ -z "$value" ]; then
+            echo "::warning::${VAR_NAME} is empty; nothing to disable."
+            exit 0
+          fi
+
+          completed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          updated_value="$(printf '%s' "$value" | jq -c --arg ts "$completed_at" '.enabled = false | .completed_at_utc = $ts')"
+          payload="$(jq -cn --arg name "$VAR_NAME" --arg value "$updated_value" '{name:$name,value:$value}')"
+
+          update_status=$(curl -sS -o /tmp/window_disable_update.json -w "%{http_code}" \
+            -X PATCH \
+            -H "$AUTH_HEADER" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            "${API_BASE}/${VAR_NAME}")
+
+          if [ "$update_status" != "204" ]; then
+            echo "::warning::Failed to disable ${VAR_NAME} (HTTP ${update_status})."
+            cat /tmp/window_disable_update.json
+            exit 0
+          fi
+
+          echo "::notice::Window completed and disabled in ${VAR_NAME}."
