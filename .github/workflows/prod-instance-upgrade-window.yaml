@@ -120,96 +120,20 @@ jobs:
                   f.write(f"- {line}\n")
           PY
 
-          WINDOW_JSON="$(cat instance-window.json)"
-          {
-            echo "window_json<<EOF"
-            echo "$WINDOW_JSON"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Upsert repository variable
-        env:
-          GH_API_TOKEN: ${{ secrets.GH_ACTIONS_VARIABLES_TOKEN }}
-          GITHUB_TOKEN_FALLBACK: ${{ github.token }}
-          WINDOW_JSON: ${{ steps.window.outputs.window_json }}
-        run: |
-          set -euo pipefail
-
-          API_TOKEN="${GH_API_TOKEN:-$GITHUB_TOKEN_FALLBACK}"
-          if [ -z "$API_TOKEN" ]; then
-            echo "::error::No GitHub API token available."
-            exit 1
-          fi
-
-          VAR_NAME="PROD_INSTANCE_UPGRADE_WINDOW"
-          API_BASE="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/variables"
-          AUTH_HEADER="Authorization: Bearer ${API_TOKEN}"
-
-          payload="$(jq -cn --arg name "$VAR_NAME" --arg value "$WINDOW_JSON" '{name:$name,value:$value}')"
-
-          get_status=$(curl -sS -o /tmp/var_get.json -w "%{http_code}" \
-            -H "$AUTH_HEADER" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${API_BASE}/${VAR_NAME}")
-
-          if [ "$get_status" = "200" ]; then
-            update_status=$(curl -sS -o /tmp/var_update.json -w "%{http_code}" \
-              -X PATCH \
-              -H "$AUTH_HEADER" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              -H "Content-Type: application/json" \
-              -d "$payload" \
-              "${API_BASE}/${VAR_NAME}")
-
-            if [ "$update_status" != "204" ]; then
-              echo "::error::Failed to update variable ${VAR_NAME} (HTTP ${update_status})."
-              cat /tmp/var_update.json
-              exit 1
-            fi
-
-            echo "::notice::Updated repository variable ${VAR_NAME}."
-          elif [ "$get_status" = "404" ]; then
-            create_status=$(curl -sS -o /tmp/var_create.json -w "%{http_code}" \
-              -X POST \
-              -H "$AUTH_HEADER" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              -H "Content-Type: application/json" \
-              -d "$payload" \
-              "${API_BASE}")
-
-            if [ "$create_status" != "201" ]; then
-              echo "::error::Failed to create variable ${VAR_NAME} (HTTP ${create_status})."
-              cat /tmp/var_create.json
-              exit 1
-            fi
-
-            echo "::notice::Created repository variable ${VAR_NAME}."
-          else
-            if [ "$get_status" = "403" ]; then
-              echo "::error::Token cannot access repository variables (HTTP 403)."
-              echo "::error::Add secret GH_ACTIONS_VARIABLES_TOKEN with permission to read/write Actions variables."
-            fi
-            echo "::error::Unexpected response while checking variable ${VAR_NAME} (HTTP ${get_status})."
-            cat /tmp/var_get.json
-            exit 1
-          fi
+      - name: Upload window artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-instance-upgrade-window
+          path: instance-window.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Trigger immediate reconciliation
         env:
-          GH_API_TOKEN: ${{ secrets.GH_ACTIONS_VARIABLES_TOKEN }}
-          GITHUB_TOKEN_FALLBACK: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-
-          API_TOKEN="${GH_API_TOKEN:-$GITHUB_TOKEN_FALLBACK}"
-          if [ -z "$API_TOKEN" ]; then
-            echo "::error::No GitHub API token available."
-            exit 1
-          fi
 
           workflow_file="prod-instance-upgrade-window-reconciler.yaml"
           dispatch_ref="${DEFAULT_BRANCH:-${GITHUB_REF_NAME}}"
@@ -217,7 +141,7 @@ jobs:
 
           dispatch_status=$(curl -sS -o /tmp/reconciler_dispatch.json -w "%{http_code}" \
             -X POST \
-            -H "Authorization: Bearer ${API_TOKEN}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             -H "Content-Type: application/json" \
