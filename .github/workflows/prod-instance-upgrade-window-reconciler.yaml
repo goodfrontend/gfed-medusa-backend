@@ -181,6 +181,8 @@ jobs:
 
           service_id="$(echo "$service_data" | jq -r '.id // empty')"
           current_plan="$(echo "$service_data" | jq -r '.serviceDetails.plan // .plan // empty')"
+          resolved_service_name="$(echo "$service_data" | jq -r '.name // empty')"
+          resolved_service_slug="$(echo "$service_data" | jq -r '.slug // empty')"
 
           if [ -z "$service_id" ]; then
             echo "::error::Could not determine service ID for ${SERVICE_NAME}."
@@ -193,6 +195,11 @@ jobs:
             exit 1
           fi
 
+          echo "::notice::Resolved Render service: query_name='${SERVICE_NAME}', resolved_name='${resolved_service_name}', slug='${resolved_service_slug}', service_id='${service_id}', current_plan='${current_plan}'"
+          if [ -n "$resolved_service_name" ] && [ "$resolved_service_name" != "$SERVICE_NAME" ]; then
+            echo "::warning::Resolved service name differs from configured service name."
+          fi
+
           echo "service_id=${service_id}" >> "$GITHUB_OUTPUT"
           echo "current_plan=${current_plan}" >> "$GITHUB_OUTPUT"
           echo "target_plan=${TARGET_PLAN}" >> "$GITHUB_OUTPUT"
@@ -202,6 +209,72 @@ jobs:
             echo "plan_changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          get_current_plan() {
+            local resp body status plan
+            resp="$(curl -sS -w "\n%{http_code}" \
+              "https://api.render.com/v1/services/${service_id}" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Accept: application/json")"
+
+            body="$(echo "$resp" | head -n -1)"
+            status="$(echo "$resp" | tail -n 1)"
+
+            if [ "$status" -lt 300 ]; then
+              plan="$(echo "$body" | jq -r '.serviceDetails.plan // .plan // .service.serviceDetails.plan // .service.plan // empty')"
+              if [ -n "$plan" ]; then
+                echo "$plan"
+                return 0
+              fi
+            fi
+
+            resp="$(curl -sS -w "\n%{http_code}" \
+              "https://api.render.com/v1/services?name=${SERVICE_NAME}&limit=1" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Accept: application/json")"
+
+            body="$(echo "$resp" | head -n -1)"
+            status="$(echo "$resp" | tail -n 1)"
+
+            if [ "$status" -ge 300 ]; then
+              echo ""
+              return 1
+            fi
+
+            plan="$(echo "$body" | jq -r '.[0].service.serviceDetails.plan // .[0].service.plan // empty')"
+            if [ -z "$plan" ]; then
+              echo ""
+              return 1
+            fi
+
+            echo "$plan"
+            return 0
+          }
+
+          wait_for_target_plan() {
+            local max_attempts=24
+            local sleep_seconds=10
+            local attempt=1
+            local observed=""
+
+            while [ "$attempt" -le "$max_attempts" ]; do
+              if observed="$(get_current_plan)"; then
+                echo "Verification attempt ${attempt}/${max_attempts}: observed plan '${observed}'" >&2
+                if [ "$observed" = "$TARGET_PLAN" ]; then
+                  echo "$observed"
+                  return 0
+                fi
+              else
+                echo "Verification attempt ${attempt}/${max_attempts}: could not read current plan yet" >&2
+              fi
+
+              attempt=$((attempt + 1))
+              sleep "$sleep_seconds"
+            done
+
+            echo "${observed}"
+            return 1
+          }
 
           patch_service() {
             local payload="$1"
@@ -229,30 +302,38 @@ jobs:
 
           payload_service_details="$(jq -cn --arg plan "$TARGET_PLAN" '{serviceDetails:{plan:$plan}}')"
           payload_root="$(jq -cn --arg plan "$TARGET_PLAN" '{plan:$plan}')"
+          patched_with=""
 
-          if ! patch_service "$payload_service_details" "serviceDetails.plan"; then
-            patch_service "$payload_root" "plan"
+          if patch_service "$payload_service_details" "serviceDetails.plan"; then
+            patched_with="serviceDetails.plan"
+          else
+            if ! patch_service "$payload_root" "plan"; then
+              echo "::error::All plan update patch attempts failed."
+              exit 1
+            fi
+            patched_with="plan"
           fi
 
-          verify_resp="$(curl -sS -w "\n%{http_code}" \
-            "https://api.render.com/v1/services?name=${SERVICE_NAME}&limit=1" \
-            -H "Authorization: Bearer ${RENDER_API_KEY}" \
-            -H "Accept: application/json")"
+          if ! updated_plan="$(wait_for_target_plan)"; then
+            echo "::warning::Plan did not converge after first patch attempt; trying alternate payload."
 
-          verify_body="$(echo "$verify_resp" | head -n -1)"
-          verify_status="$(echo "$verify_resp" | tail -n 1)"
+            if [ "$patched_with" = "serviceDetails.plan" ]; then
+              retry_payload="$payload_root"
+              retry_label="plan"
+            else
+              retry_payload="$payload_service_details"
+              retry_label="serviceDetails.plan"
+            fi
 
-          if [ "$verify_status" -ge 300 ]; then
-            echo "::error::Failed to verify Render service after patch (HTTP ${verify_status})."
-            echo "$verify_body"
-            exit 1
-          fi
+            if ! patch_service "$retry_payload" "$retry_label"; then
+              echo "::error::Plan verification failed. Expected '${TARGET_PLAN}', got '${updated_plan}'."
+              exit 1
+            fi
 
-          updated_plan="$(echo "$verify_body" | jq -r '.[0].service.serviceDetails.plan // .[0].service.plan // empty')"
-
-          if [ "$updated_plan" != "$TARGET_PLAN" ]; then
-            echo "::error::Plan verification failed. Expected '${TARGET_PLAN}', got '${updated_plan}'."
-            exit 1
+            if ! updated_plan="$(wait_for_target_plan)"; then
+              echo "::error::Plan verification failed after retry. Expected '${TARGET_PLAN}', got '${updated_plan}'."
+              exit 1
+            fi
           fi
 
           echo "::notice::Plan changed from '${current_plan}' to '${updated_plan}'."
