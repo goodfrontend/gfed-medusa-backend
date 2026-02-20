@@ -15,8 +15,8 @@ projects:
               - fromGroup: backend-env-group-prod
         databases:
           - name: gfed-medusa-database
-            databaseName: gfed_medusa_database_go9r
-            user: gfed_medusa_database_go9r_user
+            databaseName: gfed_medusa_database_abc1
+            user: gfed_medusa_database_abc1_user
             plan: free
             region: singapore
             ipAllowList:
