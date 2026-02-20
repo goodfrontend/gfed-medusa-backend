@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   configure:
-    name: Save upgrade window for gfed-medusa-be
+    name: Save upgrade window for gfed-medusa-be and gfed-medusa-database
     runs-on: ubuntu-latest
     steps:
       - name: Validate inputs and convert to UTC
@@ -89,6 +89,12 @@ jobs:
           payload = {
               "enabled": True,
               "service_name": "gfed-medusa-be",
+              "service_from_plan": "free",
+              "service_to_plan": "standard",
+              "default_database_name": "gfed-medusa-database",
+              "window_database_name": "gfed-medusa-database-paid",
+              "database_url_env_key": "DATABASE_URL",
+              "database_name_env_key": "DB_NAME",
               "from_plan": "free",
               "to_plan": "standard",
               "timezone": tz_name,
@@ -109,6 +115,9 @@ jobs:
 
           summary = [
               f"Configured window for service: {payload['service_name']}",
+              f"Service plan window: {payload['service_from_plan']} -> {payload['service_to_plan']} -> {payload['service_from_plan']}",
+              f"Database switch window: {payload['default_database_name']} -> {payload['window_database_name']} -> {payload['default_database_name']}",
+              f"Service DB env keys: {payload['database_url_env_key']}, {payload['database_name_env_key']}",
               f"Timezone: {tz_name}",
               f"Start (local): {start_raw}",
               f"End (local): {end_raw}",

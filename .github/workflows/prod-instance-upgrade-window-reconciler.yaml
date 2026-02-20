@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   reconcile:
-    name: Reconcile gfed-medusa-be instance plan
+    name: Reconcile prod service plan and database routing window
     runs-on: ubuntu-latest
     steps:
       - name: Load configured upgrade window
@@ -88,14 +88,18 @@ jobs:
           fi
 
           service_name="$(jq -r '.service_name // empty' window.json)"
-          from_plan="$(jq -r '.from_plan // empty' window.json)"
-          to_plan="$(jq -r '.to_plan // empty' window.json)"
+          service_from_plan="$(jq -r '.service_from_plan // .from_plan // empty' window.json)"
+          service_to_plan="$(jq -r '.service_to_plan // .to_plan // empty' window.json)"
+          default_database_name="$(jq -r '.default_database_name // .database_name // "gfed-medusa-database"' window.json)"
+          window_database_name="$(jq -r '.window_database_name // "gfed-medusa-database-paid"' window.json)"
+          database_url_env_key="$(jq -r '.database_url_env_key // "DATABASE_URL"' window.json)"
+          database_name_env_key="$(jq -r '.database_name_env_key // "DB_NAME"' window.json)"
           start_epoch="$(jq -r '.start_epoch // empty' window.json)"
           end_epoch="$(jq -r '.end_epoch // empty' window.json)"
           start_utc="$(jq -r '.start_utc // empty' window.json)"
           end_utc="$(jq -r '.end_utc // empty' window.json)"
 
-          if [ -z "$service_name" ] || [ -z "$from_plan" ] || [ -z "$to_plan" ] || [ -z "$start_epoch" ] || [ -z "$end_epoch" ]; then
+          if [ -z "$service_name" ] || [ -z "$service_from_plan" ] || [ -z "$service_to_plan" ] || [ -z "$default_database_name" ] || [ -z "$window_database_name" ] || [ -z "$database_url_env_key" ] || [ -z "$database_name_env_key" ] || [ -z "$start_epoch" ] || [ -z "$end_epoch" ]; then
             echo "::error::Window payload is missing required fields."
             cat window.json
             exit 1
@@ -120,25 +124,33 @@ jobs:
 
           if [ "$now_epoch" -lt "$start_epoch" ]; then
             phase="before_start"
-            target_plan="$from_plan"
+            target_service_plan="$service_from_plan"
+            target_database_name="$default_database_name"
           elif [ "$now_epoch" -lt "$end_epoch" ]; then
             phase="inside_window"
-            target_plan="$to_plan"
+            target_service_plan="$service_to_plan"
+            target_database_name="$window_database_name"
           else
             phase="after_end"
-            target_plan="$from_plan"
+            target_service_plan="$service_from_plan"
+            target_database_name="$default_database_name"
           fi
 
-          echo "::notice::Current phase: ${phase}; target plan: ${target_plan}"
+          echo "::notice::Current phase: ${phase}; target service plan: ${target_service_plan}; target database routing: ${target_database_name}"
           {
             echo "configured=true"
             echo "artifact_id=$artifact_id"
             echo "artifact_created_at=$artifact_created_at"
             echo "service_name=$service_name"
-            echo "target_plan=$target_plan"
+            echo "default_database_name=$default_database_name"
+            echo "window_database_name=$window_database_name"
+            echo "database_url_env_key=$database_url_env_key"
+            echo "database_name_env_key=$database_name_env_key"
+            echo "target_service_plan=$target_service_plan"
+            echo "target_database_name=$target_database_name"
             echo "phase=$phase"
-            echo "from_plan=$from_plan"
-            echo "to_plan=$to_plan"
+            echo "service_from_plan=$service_from_plan"
+            echo "service_to_plan=$service_to_plan"
             echo "start_utc=$start_utc"
             echo "end_utc=$end_utc"
             echo "now_utc=$now_utc"
@@ -282,12 +294,146 @@ jobs:
 
           echo "::notice::Enabled autoSync for blueprint ${BLUEPRINT_ID}."
 
-      - name: Reconcile render.yaml plan
+      - name: Resolve Render Postgres IDs for window routing
+        if: steps.window.outputs.configured == 'true'
+        id: postgres
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          DEFAULT_DATABASE_NAME: ${{ steps.window.outputs.default_database_name }}
+          WINDOW_DATABASE_NAME: ${{ steps.window.outputs.window_database_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RENDER_API_KEY:-}" ]; then
+            echo "::error::Missing required secret RENDER_API_KEY."
+            exit 1
+          fi
+
+          postgres_resp="$(curl -sS -w "\n%{http_code}" \
+            "https://api.render.com/v1/postgres?limit=100" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Accept: application/json")"
+
+          postgres_body="$(echo "$postgres_resp" | head -n -1)"
+          postgres_status="$(echo "$postgres_resp" | tail -n 1)"
+
+          if [ "$postgres_status" -ge 300 ]; then
+            echo "::error::Failed to list Render Postgres instances (HTTP ${postgres_status})."
+            echo "$postgres_body"
+            exit 1
+          fi
+
+          default_db_id="$(echo "$postgres_body" | jq -r --arg n "$DEFAULT_DATABASE_NAME" '[.[] | (.postgres // .) | select(.name == $n) | .id][0] // empty')"
+          window_db_id="$(echo "$postgres_body" | jq -r --arg n "$WINDOW_DATABASE_NAME" '[.[] | (.postgres // .) | select(.name == $n) | .id][0] // empty')"
+
+          if [ -z "$default_db_id" ]; then
+            echo "::error::Default database '${DEFAULT_DATABASE_NAME}' was not found in Render account."
+            exit 1
+          fi
+
+          if [ -z "$window_db_id" ]; then
+            echo "::error::Window database '${WINDOW_DATABASE_NAME}' was not found in Render account."
+            exit 1
+          fi
+
+          if [ "$default_db_id" = "$window_db_id" ]; then
+            echo "::error::Default and window databases resolve to the same Postgres ID (${default_db_id})."
+            exit 1
+          fi
+
+          echo "::notice::Resolved Postgres IDs: default=${DEFAULT_DATABASE_NAME} (${default_db_id}), window=${WINDOW_DATABASE_NAME} (${window_db_id})."
+          {
+            echo "default_db_id=${default_db_id}"
+            echo "window_db_id=${window_db_id}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resume window database before switching traffic
+        if: steps.window.outputs.configured == 'true' && steps.window.outputs.phase == 'inside_window'
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          WINDOW_DB_ID: ${{ steps.postgres.outputs.window_db_id }}
+          WINDOW_DATABASE_NAME: ${{ steps.window.outputs.window_database_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WINDOW_DB_ID:-}" ]; then
+            echo "::error::Missing window Postgres ID."
+            exit 1
+          fi
+
+          detail_resp="$(curl -sS -w "\n%{http_code}" \
+            "https://api.render.com/v1/postgres/${WINDOW_DB_ID}" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Accept: application/json")"
+
+          detail_body="$(echo "$detail_resp" | head -n -1)"
+          detail_status="$(echo "$detail_resp" | tail -n 1)"
+          if [ "$detail_status" -ge 300 ]; then
+            echo "::error::Failed to fetch Postgres '${WINDOW_DATABASE_NAME}' (HTTP ${detail_status})."
+            echo "$detail_body"
+            exit 1
+          fi
+
+          current_suspended="$(echo "$detail_body" | jq -r '.suspended // empty')"
+          echo "::notice::Current window DB suspended state: ${current_suspended}"
+
+          if [ "$current_suspended" = "not_suspended" ]; then
+            echo "::notice::Window database already resumed."
+            exit 0
+          fi
+
+          resume_resp="$(curl -sS -w "\n%{http_code}" \
+            -X POST "https://api.render.com/v1/postgres/${WINDOW_DB_ID}/resume" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Accept: application/json")"
+
+          resume_body="$(echo "$resume_resp" | head -n -1)"
+          resume_status="$(echo "$resume_resp" | tail -n 1)"
+          if [ "$resume_status" -ge 300 ]; then
+            echo "::error::Failed to resume Postgres '${WINDOW_DATABASE_NAME}' (HTTP ${resume_status})."
+            echo "$resume_body"
+            exit 1
+          fi
+
+          attempts=1
+          max_attempts=60
+          sleep_seconds=10
+          while [ "$attempts" -le "$max_attempts" ]; do
+            poll_resp="$(curl -sS -w "\n%{http_code}" \
+              "https://api.render.com/v1/postgres/${WINDOW_DB_ID}" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Accept: application/json")"
+            poll_body="$(echo "$poll_resp" | head -n -1)"
+            poll_status="$(echo "$poll_resp" | tail -n 1)"
+
+            if [ "$poll_status" -ge 300 ]; then
+              echo "::warning::Polling Postgres resume status failed (HTTP ${poll_status}); retrying."
+            else
+              suspended_state="$(echo "$poll_body" | jq -r '.suspended // empty')"
+              postgres_status="$(echo "$poll_body" | jq -r '.status // empty')"
+              echo "Resume poll ${attempts}/${max_attempts}: suspended=${suspended_state}, status=${postgres_status}"
+              if [ "$suspended_state" = "not_suspended" ]; then
+                echo "::notice::Window database is resumed."
+                exit 0
+              fi
+            fi
+
+            attempts=$((attempts + 1))
+            sleep "$sleep_seconds"
+          done
+
+          echo "::error::Timed out waiting for window database resume."
+          exit 1
+
+      - name: Reconcile render.yaml plans
         if: steps.window.outputs.configured == 'true'
         id: file-plan
         env:
           SERVICE_NAME: ${{ steps.window.outputs.service_name }}
-          TARGET_PLAN: ${{ steps.window.outputs.target_plan }}
+          TARGET_SERVICE_PLAN: ${{ steps.window.outputs.target_service_plan }}
+          TARGET_DATABASE_NAME: ${{ steps.window.outputs.target_database_name }}
+          DATABASE_URL_ENV_KEY: ${{ steps.window.outputs.database_url_env_key }}
+          DATABASE_NAME_ENV_KEY: ${{ steps.window.outputs.database_name_env_key }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
@@ -300,75 +446,194 @@ jobs:
           python - <<'PY'
           import os
           import re
-          import sys
 
           path = "render.yaml"
           service_name = os.environ["SERVICE_NAME"].strip()
-          target_plan = os.environ["TARGET_PLAN"].strip()
+          target_service_plan = os.environ["TARGET_SERVICE_PLAN"].strip()
+          target_database_name = os.environ["TARGET_DATABASE_NAME"].strip()
+          database_url_env_key = os.environ["DATABASE_URL_ENV_KEY"].strip()
+          database_name_env_key = os.environ["DATABASE_NAME_ENV_KEY"].strip()
 
-          if not service_name or not target_plan:
-              raise SystemExit("SERVICE_NAME and TARGET_PLAN are required.")
+          if not service_name or not target_service_plan or not target_database_name or not database_url_env_key or not database_name_env_key:
+              raise SystemExit("SERVICE_NAME, TARGET_SERVICE_PLAN, TARGET_DATABASE_NAME, DATABASE_URL_ENV_KEY, and DATABASE_NAME_ENV_KEY are required.")
 
           with open(path, "r", encoding="utf-8") as f:
               lines = f.readlines()
 
-          in_production = False
-          production_indent = None
-          service_item_indent = 10
-          pending_plan_idx = None
-          previous_plan = ""
-          changed = False
-          found = False
+          def indent_len(s: str) -> int:
+              return len(s) - len(s.lstrip(" "))
 
-          for i, line in enumerate(lines):
-              env_match = re.match(r'^(\s*)-\s+name:\s*("?)([^"\n]+)\2\s*$', line)
-              if env_match:
-                  indent = len(env_match.group(1))
-                  env_name = env_match.group(3).strip()
-                  if indent == 6:
-                      if env_name == "Production":
-                          in_production = True
-                          production_indent = indent
-                          pending_plan_idx = None
-                          continue
-                      if in_production and production_indent == indent:
-                          in_production = False
-                          pending_plan_idx = None
-
-              if not in_production:
-                  continue
-
-              service_start_match = re.match(r'^(\s*)-\s+\w+:\s*.*$', line)
-              if service_start_match and len(service_start_match.group(1)) == service_item_indent:
-                  pending_plan_idx = None
-
-              plan_match = re.match(r'^(\s*plan:\s*)([^#\n]+)(\s*(?:#.*)?)$', line.rstrip("\n"))
-              if plan_match and len(plan_match.group(1)) >= 12:
-                  pending_plan_idx = i
-
-              name_match = re.match(r'^(\s*)name:\s*("?)([^"\n]+)\2\s*$', line)
-              if name_match and len(name_match.group(1)) >= 12:
-                  current_name = name_match.group(3).strip()
-                  if current_name != service_name:
-                      continue
-
-                  found = True
-                  if pending_plan_idx is None:
-                      raise SystemExit(f"Found service '{service_name}' but no corresponding plan field.")
-
-                  original = lines[pending_plan_idx].rstrip("\n")
-                  m = re.match(r'^(\s*plan:\s*)([^#\n]+?)(\s*(?:#.*)?)$', original)
+          def find_production_bounds(lines_):
+              start = None
+              indent = None
+              env_pattern = re.compile(r'^(\s*)-\s+name:\s*("?)([^"\n]+)\2\s*$')
+              for idx, line in enumerate(lines_):
+                  m = env_pattern.match(line)
                   if not m:
-                      raise SystemExit("Failed to parse plan line for target service.")
+                      continue
+                  name = m.group(3).strip()
+                  cur_indent = len(m.group(1))
+                  if name == "Production" and cur_indent == 6:
+                      start = idx
+                      indent = cur_indent
+                      break
+              if start is None:
+                  raise SystemExit(f"Production environment was not found in {path}.")
 
-                  previous_plan = m.group(2).strip().strip("'\"")
-                  if previous_plan != target_plan:
-                      lines[pending_plan_idx] = f"{m.group(1)}{target_plan}{m.group(3)}\n"
+              end = len(lines_)
+              for idx in range(start + 1, len(lines_)):
+                  m = env_pattern.match(lines_[idx])
+                  if m and len(m.group(1)) == indent:
+                      end = idx
+                      break
+              return start, end, indent
+
+          def find_services_bounds(lines_, prod_start, prod_end, prod_indent):
+              services_indent = prod_indent + 2
+              services_start = None
+              for idx in range(prod_start + 1, prod_end):
+                  if lines_[idx].strip() == "services:" and indent_len(lines_[idx]) == services_indent:
+                      services_start = idx
+                      break
+              if services_start is None:
+                  raise SystemExit("Production services block was not found in render.yaml.")
+
+              services_end = prod_end
+              for idx in range(services_start + 1, prod_end):
+                  stripped = lines_[idx].strip()
+                  if stripped and not stripped.startswith("#") and indent_len(lines_[idx]) <= services_indent:
+                      services_end = idx
+                      break
+              return services_start, services_end, services_indent
+
+          def find_service_item_bounds(lines_, services_start, services_end, services_indent, target_service):
+              item_indent = services_indent + 2
+              item_starts = []
+              item_start_pattern = re.compile(r'^(\s*)-\s+\w+:\s*.*$')
+
+              for idx in range(services_start + 1, services_end):
+                  m = item_start_pattern.match(lines_[idx])
+                  if m and len(m.group(1)) == item_indent:
+                      item_starts.append(idx)
+
+              if not item_starts:
+                  raise SystemExit("No services were found in Production services block.")
+
+              item_starts.append(services_end)
+              name_pattern = re.compile(r'^\s*name:\s*("?)([^"\n]+)\1\s*$')
+
+              for i in range(len(item_starts) - 1):
+                  start = item_starts[i]
+                  end = item_starts[i + 1]
+                  for idx in range(start, end):
+                      m = name_pattern.match(lines_[idx])
+                      if m and m.group(2).strip() == target_service:
+                          return start, end, item_indent
+
+              raise SystemExit(f"Service '{target_service}' in Production services block was not found in {path}.")
+
+          production_start, production_end, production_indent = find_production_bounds(lines)
+          services_start, services_end, services_indent = find_services_bounds(lines, production_start, production_end, production_indent)
+          service_start, service_end, service_item_indent = find_service_item_bounds(lines, services_start, services_end, services_indent, service_name)
+
+          changed = False
+          service_previous_plan = ""
+          previous_database_binding = ""
+
+          plan_pattern = re.compile(r'^(\s*plan:\s*)([^#\n]+?)(\s*(?:#.*)?)$')
+          plan_idx = None
+          for idx in range(service_start, service_end):
+              line = lines[idx].rstrip("\n")
+              m = plan_pattern.match(line)
+              if m and indent_len(lines[idx]) >= service_item_indent + 2:
+                  plan_idx = idx
+                  service_previous_plan = m.group(2).strip().strip("'\"")
+                  if service_previous_plan != target_service_plan:
+                      lines[idx] = f"{m.group(1)}{target_service_plan}{m.group(3)}\n"
                       changed = True
                   break
+          if plan_idx is None:
+              raise SystemExit(f"Plan field for service '{service_name}' was not found.")
 
-          if not found:
-              raise SystemExit(f"Service '{service_name}' in Production environment was not found in {path}.")
+          field_indent = service_item_indent + 2
+          env_header_idx = None
+          for idx in range(service_start, service_end):
+              if lines[idx].strip() == "envVars:" and indent_len(lines[idx]) == field_indent:
+                  env_header_idx = idx
+                  break
+
+          if env_header_idx is None:
+              insert_at = service_end
+              env_block = [
+                  " " * field_indent + "envVars:\n",
+                  " " * (field_indent + 2) + f"- key: {database_url_env_key}\n",
+                  " " * (field_indent + 4) + "fromDatabase:\n",
+                  " " * (field_indent + 6) + f"name: {target_database_name}\n",
+                  " " * (field_indent + 6) + "property: connectionString\n",
+                  " " * (field_indent + 2) + f"- key: {database_name_env_key}\n",
+                  " " * (field_indent + 4) + "fromDatabase:\n",
+                  " " * (field_indent + 6) + f"name: {target_database_name}\n",
+                  " " * (field_indent + 6) + "property: database\n",
+              ]
+              lines[insert_at:insert_at] = env_block
+              changed = True
+          else:
+              env_indent = indent_len(lines[env_header_idx])
+              env_end = service_end
+              for idx in range(env_header_idx + 1, service_end):
+                  stripped = lines[idx].strip()
+                  if stripped and not stripped.startswith("#") and indent_len(lines[idx]) <= env_indent:
+                      env_end = idx
+                      break
+
+              entry_indent = env_indent + 2
+              entry_starts = []
+              entry_pattern = re.compile(r'^(\s*)-\s+.*$')
+              for idx in range(env_header_idx + 1, env_end):
+                  m = entry_pattern.match(lines[idx])
+                  if m and len(m.group(1)) == entry_indent:
+                      entry_starts.append(idx)
+              entry_starts.append(env_end)
+
+              key_pattern = re.compile(r'^\s*-\s+key:\s*("?)([^"\n]+)\1\s*$')
+              from_db_name_pattern = re.compile(r'^\s*name:\s*("?)([^"\n]+)\1\s*$')
+
+              preserved_entries = []
+              for i in range(len(entry_starts) - 1):
+                  start = entry_starts[i]
+                  end = entry_starts[i + 1]
+                  entry_lines = lines[start:end]
+                  first = entry_lines[0].rstrip("\n")
+                  key_match = key_pattern.match(first)
+                  key_name = key_match.group(2).strip() if key_match else ""
+
+                  if key_name in (database_url_env_key, database_name_env_key):
+                      if key_name == database_url_env_key:
+                          for raw_line in entry_lines:
+                              m = from_db_name_pattern.match(raw_line)
+                              if m:
+                                  previous_database_binding = m.group(2).strip()
+                                  break
+                      continue
+
+                  preserved_entries.extend(entry_lines)
+
+              new_entries = [
+                  " " * entry_indent + f"- key: {database_url_env_key}\n",
+                  " " * (entry_indent + 2) + "fromDatabase:\n",
+                  " " * (entry_indent + 4) + f"name: {target_database_name}\n",
+                  " " * (entry_indent + 4) + "property: connectionString\n",
+                  " " * entry_indent + f"- key: {database_name_env_key}\n",
+                  " " * (entry_indent + 2) + "fromDatabase:\n",
+                  " " * (entry_indent + 4) + f"name: {target_database_name}\n",
+                  " " * (entry_indent + 4) + "property: database\n",
+              ]
+
+              replacement = [lines[env_header_idx]] + preserved_entries + new_entries
+              original = lines[env_header_idx:env_end]
+              if replacement != original:
+                  lines[env_header_idx:env_end] = replacement
+                  changed = True
 
           if changed:
               with open(path, "w", encoding="utf-8") as f:
@@ -377,18 +642,21 @@ jobs:
           output_file = os.environ["GITHUB_OUTPUT"]
           with open(output_file, "a", encoding="utf-8") as out:
               out.write(f"changed={'true' if changed else 'false'}\n")
-              out.write(f"previous_plan={previous_plan}\n")
-              out.write(f"target_plan={target_plan}\n")
+              out.write(f"service_previous_plan={service_previous_plan}\n")
+              out.write(f"service_target_plan={target_service_plan}\n")
+              out.write(f"target_database_name={target_database_name}\n")
+              out.write(f"database_binding_before={previous_database_binding}\n")
           PY
 
-          echo "::notice::render.yaml reconciliation completed for ${SERVICE_NAME}; target plan '${TARGET_PLAN}'."
+          echo "::notice::render.yaml reconciliation completed for service ${SERVICE_NAME} (plan '${TARGET_SERVICE_PLAN}') and database routing '${TARGET_DATABASE_NAME}' via env keys '${DATABASE_URL_ENV_KEY}' and '${DATABASE_NAME_ENV_KEY}'."
 
-      - name: Commit and push render.yaml plan change
+      - name: Commit and push render.yaml plan changes
         if: steps.window.outputs.configured == 'true' && steps.file-plan.outputs.changed == 'true'
         id: push-plan
         env:
           SERVICE_NAME: ${{ steps.window.outputs.service_name }}
-          TARGET_PLAN: ${{ steps.window.outputs.target_plan }}
+          TARGET_SERVICE_PLAN: ${{ steps.window.outputs.target_service_plan }}
+          TARGET_DATABASE_NAME: ${{ steps.window.outputs.target_database_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
@@ -399,7 +667,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add render.yaml
-          git commit -m "chore(render): set ${SERVICE_NAME} plan to ${TARGET_PLAN} for upgrade window [skip ci]"
+          git commit -m "chore(render): set ${SERVICE_NAME} plan to ${TARGET_SERVICE_PLAN} and route DB to ${TARGET_DATABASE_NAME} for upgrade window [skip ci]"
 
           attempt=1
           max_attempts=3
@@ -468,6 +736,82 @@ jobs:
 
           echo "::warning::No Blueprint sync timestamp change detected within wait window."
           echo "::warning::Check Render dashboard Blueprint sync history to confirm reconciliation."
+
+      - name: Suspend window database outside upgrade window
+        if: steps.window.outputs.configured == 'true' && steps.window.outputs.phase != 'inside_window'
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          WINDOW_DB_ID: ${{ steps.postgres.outputs.window_db_id }}
+          WINDOW_DATABASE_NAME: ${{ steps.window.outputs.window_database_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WINDOW_DB_ID:-}" ]; then
+            echo "::error::Missing window Postgres ID."
+            exit 1
+          fi
+
+          detail_resp="$(curl -sS -w "\n%{http_code}" \
+            "https://api.render.com/v1/postgres/${WINDOW_DB_ID}" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Accept: application/json")"
+          detail_body="$(echo "$detail_resp" | head -n -1)"
+          detail_status="$(echo "$detail_resp" | tail -n 1)"
+          if [ "$detail_status" -ge 300 ]; then
+            echo "::error::Failed to fetch Postgres '${WINDOW_DATABASE_NAME}' (HTTP ${detail_status})."
+            echo "$detail_body"
+            exit 1
+          fi
+
+          current_suspended="$(echo "$detail_body" | jq -r '.suspended // empty')"
+          echo "::notice::Current window DB suspended state: ${current_suspended}"
+
+          if [ "$current_suspended" = "suspended" ]; then
+            echo "::notice::Window database already suspended."
+            exit 0
+          fi
+
+          suspend_resp="$(curl -sS -w "\n%{http_code}" \
+            -X POST "https://api.render.com/v1/postgres/${WINDOW_DB_ID}/suspend" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Accept: application/json")"
+          suspend_body="$(echo "$suspend_resp" | head -n -1)"
+          suspend_status="$(echo "$suspend_resp" | tail -n 1)"
+          if [ "$suspend_status" -ge 300 ]; then
+            echo "::error::Failed to suspend Postgres '${WINDOW_DATABASE_NAME}' (HTTP ${suspend_status})."
+            echo "$suspend_body"
+            exit 1
+          fi
+
+          attempts=1
+          max_attempts=60
+          sleep_seconds=10
+          while [ "$attempts" -le "$max_attempts" ]; do
+            poll_resp="$(curl -sS -w "\n%{http_code}" \
+              "https://api.render.com/v1/postgres/${WINDOW_DB_ID}" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Accept: application/json")"
+            poll_body="$(echo "$poll_resp" | head -n -1)"
+            poll_status="$(echo "$poll_resp" | tail -n 1)"
+
+            if [ "$poll_status" -ge 300 ]; then
+              echo "::warning::Polling Postgres suspend status failed (HTTP ${poll_status}); retrying."
+            else
+              suspended_state="$(echo "$poll_body" | jq -r '.suspended // empty')"
+              postgres_status="$(echo "$poll_body" | jq -r '.status // empty')"
+              echo "Suspend poll ${attempts}/${max_attempts}: suspended=${suspended_state}, status=${postgres_status}"
+              if [ "$suspended_state" = "suspended" ]; then
+                echo "::notice::Window database is suspended."
+                exit 0
+              fi
+            fi
+
+            attempts=$((attempts + 1))
+            sleep "$sleep_seconds"
+          done
+
+          echo "::error::Timed out waiting for window database suspend."
+          exit 1
 
       - name: Delete completed window artifact
         if: steps.window.outputs.configured == 'true' && steps.window.outputs.phase == 'after_end'
