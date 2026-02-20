@@ -88,12 +88,40 @@ jobs:
     secrets:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
 
+  promote-latest:
+    name: Promote deployed image to latest
+    needs: [build, deploy-prod]
+    if: needs.deploy-prod.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote SHA image to latest
+        env:
+          SOURCE_IMAGE: ${{ needs.build.outputs.image_tag }}
+          TARGET_IMAGE: ghcr.io/${{ github.repository }}/medusa:latest
+        run: |
+          set -euo pipefail
+          docker pull "$SOURCE_IMAGE"
+          docker tag "$SOURCE_IMAGE" "$TARGET_IMAGE"
+          docker push "$TARGET_IMAGE"
+          echo "Promoted $SOURCE_IMAGE to $TARGET_IMAGE"
+
   create-tags:
     name: Create production tags
-    needs: [detect-changes, build, deploy-smoke, deploy-qa, deploy-prod]
+    needs: [detect-changes, build, deploy-smoke, deploy-qa, deploy-prod, promote-latest]
     if: |
       always() &&
-      needs.deploy-prod.result == 'success'
+      needs.deploy-prod.result == 'success' &&
+      needs.promote-latest.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
