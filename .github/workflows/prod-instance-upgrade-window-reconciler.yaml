@@ -7,7 +7,7 @@ on:
     - cron: "*/5 * * * *"
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 concurrency:
@@ -144,13 +144,19 @@ jobs:
             echo "now_utc=$now_utc"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Reconcile Render service plan
+      - name: Checkout default branch
         if: steps.window.outputs.configured == 'true'
-        id: reconcile
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Resolve Blueprint for target service
+        if: steps.window.outputs.configured == 'true'
+        id: blueprint
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           SERVICE_NAME: ${{ steps.window.outputs.service_name }}
-          TARGET_PLAN: ${{ steps.window.outputs.target_plan }}
         run: |
           set -euo pipefail
 
@@ -173,171 +179,295 @@ jobs:
             exit 1
           fi
 
-          service_data="$(echo "$service_body" | jq -c '.[0].service // empty')"
-          if [ -z "$service_data" ]; then
+          service_id="$(echo "$service_body" | jq -r '.[0].service.id // empty')"
+          service_type="$(echo "$service_body" | jq -r '.[0].service.type // empty')"
+
+          if [ -z "$service_id" ]; then
             echo "::error::Render service not found: ${SERVICE_NAME}"
             exit 1
           fi
 
-          service_id="$(echo "$service_data" | jq -r '.id // empty')"
-          current_plan="$(echo "$service_data" | jq -r '.serviceDetails.plan // .plan // empty')"
-          resolved_service_name="$(echo "$service_data" | jq -r '.name // empty')"
-          resolved_service_slug="$(echo "$service_data" | jq -r '.slug // empty')"
-
-          if [ -z "$service_id" ]; then
-            echo "::error::Could not determine service ID for ${SERVICE_NAME}."
+          if [ "$service_type" != "web_service" ]; then
+            echo "::error::Expected '${SERVICE_NAME}' to be a web service, found '${service_type}'."
             exit 1
           fi
 
-          if [ -z "$current_plan" ]; then
-            echo "::error::Could not determine current plan for ${SERVICE_NAME}."
-            echo "$service_data"
+          blueprints_resp="$(curl -sS -w "\n%{http_code}" \
+            "https://api.render.com/v1/blueprints?limit=100" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Accept: application/json")"
+
+          blueprints_body="$(echo "$blueprints_resp" | head -n -1)"
+          blueprints_status="$(echo "$blueprints_resp" | tail -n 1)"
+
+          if [ "$blueprints_status" -ge 300 ]; then
+            echo "::error::Failed to list Render blueprints (HTTP ${blueprints_status})."
+            echo "$blueprints_body"
             exit 1
           fi
 
-          echo "::notice::Resolved Render service: query_name='${SERVICE_NAME}', resolved_name='${resolved_service_name}', slug='${resolved_service_slug}', service_id='${service_id}', current_plan='${current_plan}'"
-          if [ -n "$resolved_service_name" ] && [ "$resolved_service_name" != "$SERVICE_NAME" ]; then
-            echo "::warning::Resolved service name differs from configured service name."
+          blueprint_ids="$(echo "$blueprints_body" | jq -r '.[]?.blueprint?.id // .[]?.id // empty')"
+          if [ -z "$blueprint_ids" ]; then
+            echo "::error::No Render blueprints were found for this API key."
+            exit 1
           fi
 
-          echo "service_id=${service_id}" >> "$GITHUB_OUTPUT"
-          echo "current_plan=${current_plan}" >> "$GITHUB_OUTPUT"
-          echo "target_plan=${TARGET_PLAN}" >> "$GITHUB_OUTPUT"
+          matched_blueprint_id=""
+          matched_blueprint_name=""
+          matched_blueprint_path=""
+          matched_auto_sync=""
+          matched_last_sync=""
 
-          if [ "$current_plan" = "$TARGET_PLAN" ]; then
-            echo "::notice::Plan already '${TARGET_PLAN}'. No change needed."
-            echo "plan_changed=false" >> "$GITHUB_OUTPUT"
+          for blueprint_id in $blueprint_ids; do
+            detail_resp="$(curl -sS -w "\n%{http_code}" \
+              "https://api.render.com/v1/blueprints/${blueprint_id}" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Accept: application/json")"
+
+            detail_body="$(echo "$detail_resp" | head -n -1)"
+            detail_status="$(echo "$detail_resp" | tail -n 1)"
+
+            if [ "$detail_status" -ge 300 ]; then
+              echo "::warning::Could not retrieve blueprint ${blueprint_id} (HTTP ${detail_status}); skipping."
+              continue
+            fi
+
+            if echo "$detail_body" | jq -e --arg sid "$service_id" --arg sn "$SERVICE_NAME" '.resources[]? | select((.id == $sid) or (.name == $sn and .type == "web_service"))' >/dev/null; then
+              matched_blueprint_id="$blueprint_id"
+              matched_blueprint_name="$(echo "$detail_body" | jq -r '.name // empty')"
+              matched_blueprint_path="$(echo "$detail_body" | jq -r '.path // empty')"
+              matched_auto_sync="$(echo "$detail_body" | jq -r '.autoSync // false')"
+              matched_last_sync="$(echo "$detail_body" | jq -r '.lastSync // empty')"
+              break
+            fi
+          done
+
+          if [ -z "$matched_blueprint_id" ]; then
+            echo "::error::No Blueprint managing '${SERVICE_NAME}' (service ID ${service_id}) was found."
+            echo "::error::Option 3 requires this service to be managed by a Render Blueprint."
+            exit 1
+          fi
+
+          echo "::notice::Matched Blueprint id='${matched_blueprint_id}', name='${matched_blueprint_name}', path='${matched_blueprint_path}', autoSync='${matched_auto_sync}', lastSync='${matched_last_sync}'"
+          {
+            echo "service_id=${service_id}"
+            echo "blueprint_id=${matched_blueprint_id}"
+            echo "blueprint_auto_sync=${matched_auto_sync}"
+            echo "blueprint_last_sync=${matched_last_sync}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Enable Blueprint autoSync
+        if: steps.window.outputs.configured == 'true' && steps.blueprint.outputs.blueprint_auto_sync != 'true'
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          BLUEPRINT_ID: ${{ steps.blueprint.outputs.blueprint_id }}
+        run: |
+          set -euo pipefail
+
+          patch_resp="$(curl -sS -w "\n%{http_code}" \
+            -X PATCH "https://api.render.com/v1/blueprints/${BLUEPRINT_ID}" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -d '{"autoSync":true}')"
+
+          patch_body="$(echo "$patch_resp" | head -n -1)"
+          patch_status="$(echo "$patch_resp" | tail -n 1)"
+
+          if [ "$patch_status" -ge 300 ]; then
+            echo "::error::Failed to enable autoSync on blueprint ${BLUEPRINT_ID} (HTTP ${patch_status})."
+            echo "$patch_body"
+            exit 1
+          fi
+
+          echo "::notice::Enabled autoSync for blueprint ${BLUEPRINT_ID}."
+
+      - name: Reconcile render.yaml plan
+        if: steps.window.outputs.configured == 'true'
+        id: file-plan
+        env:
+          SERVICE_NAME: ${{ steps.window.outputs.service_name }}
+          TARGET_PLAN: ${{ steps.window.outputs.target_plan }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          branch="${DEFAULT_BRANCH:-${GITHUB_REF_NAME}}"
+          git fetch origin "$branch"
+          git checkout -B "$branch" "origin/$branch"
+          git pull --ff-only origin "$branch"
+
+          python - <<'PY'
+          import os
+          import re
+          import sys
+
+          path = "render.yaml"
+          service_name = os.environ["SERVICE_NAME"].strip()
+          target_plan = os.environ["TARGET_PLAN"].strip()
+
+          if not service_name or not target_plan:
+              raise SystemExit("SERVICE_NAME and TARGET_PLAN are required.")
+
+          with open(path, "r", encoding="utf-8") as f:
+              lines = f.readlines()
+
+          in_production = False
+          production_indent = None
+          service_item_indent = 10
+          pending_plan_idx = None
+          previous_plan = ""
+          changed = False
+          found = False
+
+          for i, line in enumerate(lines):
+              env_match = re.match(r'^(\s*)-\s+name:\s*("?)([^"\n]+)\2\s*$', line)
+              if env_match:
+                  indent = len(env_match.group(1))
+                  env_name = env_match.group(3).strip()
+                  if indent == 6:
+                      if env_name == "Production":
+                          in_production = True
+                          production_indent = indent
+                          pending_plan_idx = None
+                          continue
+                      if in_production and production_indent == indent:
+                          in_production = False
+                          pending_plan_idx = None
+
+              if not in_production:
+                  continue
+
+              service_start_match = re.match(r'^(\s*)-\s+\w+:\s*.*$', line)
+              if service_start_match and len(service_start_match.group(1)) == service_item_indent:
+                  pending_plan_idx = None
+
+              plan_match = re.match(r'^(\s*plan:\s*)([^#\n]+)(\s*(?:#.*)?)$', line.rstrip("\n"))
+              if plan_match and len(plan_match.group(1)) >= 12:
+                  pending_plan_idx = i
+
+              name_match = re.match(r'^(\s*)name:\s*("?)([^"\n]+)\2\s*$', line)
+              if name_match and len(name_match.group(1)) >= 12:
+                  current_name = name_match.group(3).strip()
+                  if current_name != service_name:
+                      continue
+
+                  found = True
+                  if pending_plan_idx is None:
+                      raise SystemExit(f"Found service '{service_name}' but no corresponding plan field.")
+
+                  original = lines[pending_plan_idx].rstrip("\n")
+                  m = re.match(r'^(\s*plan:\s*)([^#\n]+?)(\s*(?:#.*)?)$', original)
+                  if not m:
+                      raise SystemExit("Failed to parse plan line for target service.")
+
+                  previous_plan = m.group(2).strip().strip("'\"")
+                  if previous_plan != target_plan:
+                      lines[pending_plan_idx] = f"{m.group(1)}{target_plan}{m.group(3)}\n"
+                      changed = True
+                  break
+
+          if not found:
+              raise SystemExit(f"Service '{service_name}' in Production environment was not found in {path}.")
+
+          if changed:
+              with open(path, "w", encoding="utf-8") as f:
+                  f.writelines(lines)
+
+          output_file = os.environ["GITHUB_OUTPUT"]
+          with open(output_file, "a", encoding="utf-8") as out:
+              out.write(f"changed={'true' if changed else 'false'}\n")
+              out.write(f"previous_plan={previous_plan}\n")
+              out.write(f"target_plan={target_plan}\n")
+          PY
+
+          echo "::notice::render.yaml reconciliation completed for ${SERVICE_NAME}; target plan '${TARGET_PLAN}'."
+
+      - name: Commit and push render.yaml plan change
+        if: steps.window.outputs.configured == 'true' && steps.file-plan.outputs.changed == 'true'
+        id: push-plan
+        env:
+          SERVICE_NAME: ${{ steps.window.outputs.service_name }}
+          TARGET_PLAN: ${{ steps.window.outputs.target_plan }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          branch="${DEFAULT_BRANCH:-${GITHUB_REF_NAME}}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add render.yaml
+          git commit -m "chore(render): set ${SERVICE_NAME} plan to ${TARGET_PLAN} for upgrade window [skip ci]"
+
+          attempt=1
+          max_attempts=3
+          while [ "$attempt" -le "$max_attempts" ]; do
+            if git push origin "HEAD:${branch}"; then
+              break
+            fi
+
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "::error::Failed to push render.yaml plan change after ${max_attempts} attempts."
+              exit 1
+            fi
+
+            attempt=$((attempt + 1))
+            git fetch origin "$branch"
+            git rebase "origin/${branch}"
+          done
+
+          commit_sha="$(git rev-parse HEAD)"
+          echo "commit_sha=${commit_sha}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Pushed render.yaml plan update commit ${commit_sha}."
+
+      - name: Wait for Blueprint sync after commit
+        if: steps.window.outputs.configured == 'true' && steps.file-plan.outputs.changed == 'true'
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          BLUEPRINT_ID: ${{ steps.blueprint.outputs.blueprint_id }}
+          LAST_SYNC_BEFORE: ${{ steps.blueprint.outputs.blueprint_last_sync }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BLUEPRINT_ID:-}" ]; then
+            echo "::warning::Missing blueprint ID; skipping sync wait."
             exit 0
           fi
 
-          get_current_plan() {
-            local resp body status plan
-            resp="$(curl -sS -w "\n%{http_code}" \
-              "https://api.render.com/v1/services/${service_id}" \
+          baseline="${LAST_SYNC_BEFORE:-}"
+          max_attempts=36
+          sleep_seconds=10
+          attempt=1
+
+          while [ "$attempt" -le "$max_attempts" ]; do
+            detail_resp="$(curl -sS -w "\n%{http_code}" \
+              "https://api.render.com/v1/blueprints/${BLUEPRINT_ID}" \
               -H "Authorization: Bearer ${RENDER_API_KEY}" \
               -H "Accept: application/json")"
 
-            body="$(echo "$resp" | head -n -1)"
-            status="$(echo "$resp" | tail -n 1)"
+            detail_body="$(echo "$detail_resp" | head -n -1)"
+            detail_status="$(echo "$detail_resp" | tail -n 1)"
 
-            if [ "$status" -lt 300 ]; then
-              plan="$(echo "$body" | jq -r '.serviceDetails.plan // .plan // .service.serviceDetails.plan // .service.plan // empty')"
-              if [ -n "$plan" ]; then
-                echo "$plan"
-                return 0
-              fi
-            fi
-
-            resp="$(curl -sS -w "\n%{http_code}" \
-              "https://api.render.com/v1/services?name=${SERVICE_NAME}&limit=1" \
-              -H "Authorization: Bearer ${RENDER_API_KEY}" \
-              -H "Accept: application/json")"
-
-            body="$(echo "$resp" | head -n -1)"
-            status="$(echo "$resp" | tail -n 1)"
-
-            if [ "$status" -ge 300 ]; then
-              echo ""
-              return 1
-            fi
-
-            plan="$(echo "$body" | jq -r '.[0].service.serviceDetails.plan // .[0].service.plan // empty')"
-            if [ -z "$plan" ]; then
-              echo ""
-              return 1
-            fi
-
-            echo "$plan"
-            return 0
-          }
-
-          wait_for_target_plan() {
-            local max_attempts=24
-            local sleep_seconds=10
-            local attempt=1
-            local observed=""
-
-            while [ "$attempt" -le "$max_attempts" ]; do
-              if observed="$(get_current_plan)"; then
-                echo "Verification attempt ${attempt}/${max_attempts}: observed plan '${observed}'" >&2
-                if [ "$observed" = "$TARGET_PLAN" ]; then
-                  echo "$observed"
-                  return 0
-                fi
-              else
-                echo "Verification attempt ${attempt}/${max_attempts}: could not read current plan yet" >&2
-              fi
-
-              attempt=$((attempt + 1))
-              sleep "$sleep_seconds"
-            done
-
-            echo "${observed}"
-            return 1
-          }
-
-          patch_service() {
-            local payload="$1"
-            local label="$2"
-
-            patch_resp="$(curl -sS -w "\n%{http_code}" \
-              -X PATCH "https://api.render.com/v1/services/${service_id}" \
-              -H "Authorization: Bearer ${RENDER_API_KEY}" \
-              -H "Accept: application/json" \
-              -H "Content-Type: application/json" \
-              -d "$payload")"
-
-            patch_body="$(echo "$patch_resp" | head -n -1)"
-            patch_status="$(echo "$patch_resp" | tail -n 1)"
-
-            if [ "$patch_status" -ge 300 ]; then
-              echo "::warning::Patch with ${label} failed (HTTP ${patch_status})."
-              echo "$patch_body"
-              return 1
-            fi
-
-            echo "::notice::Patch with ${label} succeeded."
-            return 0
-          }
-
-          payload_service_details="$(jq -cn --arg plan "$TARGET_PLAN" '{serviceDetails:{plan:$plan}}')"
-          payload_root="$(jq -cn --arg plan "$TARGET_PLAN" '{plan:$plan}')"
-          patched_with=""
-
-          if patch_service "$payload_service_details" "serviceDetails.plan"; then
-            patched_with="serviceDetails.plan"
-          else
-            if ! patch_service "$payload_root" "plan"; then
-              echo "::error::All plan update patch attempts failed."
-              exit 1
-            fi
-            patched_with="plan"
-          fi
-
-          if ! updated_plan="$(wait_for_target_plan)"; then
-            echo "::warning::Plan did not converge after first patch attempt; trying alternate payload."
-
-            if [ "$patched_with" = "serviceDetails.plan" ]; then
-              retry_payload="$payload_root"
-              retry_label="plan"
+            if [ "$detail_status" -ge 300 ]; then
+              echo "::warning::Blueprint retrieve failed during sync wait (HTTP ${detail_status}); retrying."
             else
-              retry_payload="$payload_service_details"
-              retry_label="serviceDetails.plan"
+              current_last_sync="$(echo "$detail_body" | jq -r '.lastSync // empty')"
+              echo "Sync wait ${attempt}/${max_attempts}: baseline='${baseline}', current='${current_last_sync}'"
+
+              if [ -n "$current_last_sync" ] && [ "$current_last_sync" != "$baseline" ]; then
+                echo "::notice::Detected Blueprint sync timestamp change: ${current_last_sync}"
+                exit 0
+              fi
             fi
 
-            if ! patch_service "$retry_payload" "$retry_label"; then
-              echo "::error::Plan verification failed. Expected '${TARGET_PLAN}', got '${updated_plan}'."
-              exit 1
-            fi
+            attempt=$((attempt + 1))
+            sleep "$sleep_seconds"
+          done
 
-            if ! updated_plan="$(wait_for_target_plan)"; then
-              echo "::error::Plan verification failed after retry. Expected '${TARGET_PLAN}', got '${updated_plan}'."
-              exit 1
-            fi
-          fi
-
-          echo "::notice::Plan changed from '${current_plan}' to '${updated_plan}'."
-          echo "plan_changed=true" >> "$GITHUB_OUTPUT"
+          echo "::warning::No Blueprint sync timestamp change detected within wait window."
+          echo "::warning::Check Render dashboard Blueprint sync history to confirm reconciliation."
 
       - name: Delete completed window artifact
         if: steps.window.outputs.configured == 'true' && steps.window.outputs.phase == 'after_end'
