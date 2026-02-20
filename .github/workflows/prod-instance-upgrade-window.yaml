@@ -90,7 +90,7 @@ jobs:
               "enabled": True,
               "service_name": "gfed-medusa-be",
               "from_plan": "free",
-              "to_plan": "starter",
+              "to_plan": "standard",
               "timezone": tz_name,
               "start_input": start_raw,
               "end_input": end_raw,
