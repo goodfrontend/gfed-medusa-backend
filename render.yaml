@@ -13,6 +13,16 @@ projects:
               url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:latest
             envVars:
               - fromGroup: backend-env-group-prod
+        databases:
+          - name: gfed-medusa-database
+            databaseName: gfed_medusa_database_go9r
+            user: gfed_medusa_database_go9r_user
+            plan: basic-256mb
+            region: singapore
+            ipAllowList:
+              - source: 0.0.0.0/0
+                description: everywhere
+            postgresMajorVersion: '18'
       - name: QA
         services:
           - type: web
