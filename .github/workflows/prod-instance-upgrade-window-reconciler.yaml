@@ -92,6 +92,8 @@ jobs:
           service_to_plan="$(jq -r '.service_to_plan // .to_plan // empty' window.json)"
           default_database_name="$(jq -r '.default_database_name // .database_name // "gfed-medusa-database"' window.json)"
           window_database_name="$(jq -r '.window_database_name // "gfed-medusa-database-paid"' window.json)"
+          resume_window_database_inside_window="$(jq -r '.resume_window_database_inside_window // true' window.json)"
+          suspend_window_database_outside_window="$(jq -r '.suspend_window_database_outside_window // true' window.json)"
           database_url_env_key="$(jq -r '.database_url_env_key // "DATABASE_URL"' window.json)"
           database_name_env_key="$(jq -r '.database_name_env_key // "DB_NAME"' window.json)"
           start_epoch="$(jq -r '.start_epoch // empty' window.json)"
@@ -119,6 +121,22 @@ jobs:
               ;;
           esac
 
+          case "$resume_window_database_inside_window" in
+            (true|false) ;;
+            (*)
+              echo "::error::resume_window_database_inside_window must be true or false."
+              exit 1
+              ;;
+          esac
+
+          case "$suspend_window_database_outside_window" in
+            (true|false) ;;
+            (*)
+              echo "::error::suspend_window_database_outside_window must be true or false."
+              exit 1
+              ;;
+          esac
+
           now_epoch="$(date -u +%s)"
           now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -136,7 +154,7 @@ jobs:
             target_database_name="$default_database_name"
           fi
 
-          echo "::notice::Current phase: ${phase}; target service plan: ${target_service_plan}; target database routing: ${target_database_name}"
+          echo "::notice::Current phase: ${phase}; target service plan: ${target_service_plan}; target database routing: ${target_database_name}; resume_window_database_inside_window=${resume_window_database_inside_window}; suspend_window_database_outside_window=${suspend_window_database_outside_window}"
           {
             echo "configured=true"
             echo "artifact_id=$artifact_id"
@@ -144,6 +162,8 @@ jobs:
             echo "service_name=$service_name"
             echo "default_database_name=$default_database_name"
             echo "window_database_name=$window_database_name"
+            echo "resume_window_database_inside_window=$resume_window_database_inside_window"
+            echo "suspend_window_database_outside_window=$suspend_window_database_outside_window"
             echo "database_url_env_key=$database_url_env_key"
             echo "database_name_env_key=$database_name_env_key"
             echo "target_service_plan=$target_service_plan"
@@ -348,7 +368,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Resume window database before switching traffic
-        if: steps.window.outputs.configured == 'true' && steps.window.outputs.phase == 'inside_window'
+        if: steps.window.outputs.configured == 'true' && steps.window.outputs.phase == 'inside_window' && steps.window.outputs.resume_window_database_inside_window == 'true'
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           WINDOW_DB_ID: ${{ steps.postgres.outputs.window_db_id }}
@@ -738,16 +758,22 @@ jobs:
           echo "::warning::Check Render dashboard Blueprint sync history to confirm reconciliation."
 
       - name: Suspend window database outside upgrade window
-        if: steps.window.outputs.configured == 'true' && steps.window.outputs.phase != 'inside_window'
+        if: steps.window.outputs.configured == 'true' && steps.window.outputs.phase != 'inside_window' && steps.window.outputs.suspend_window_database_outside_window == 'true'
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           WINDOW_DB_ID: ${{ steps.postgres.outputs.window_db_id }}
           WINDOW_DATABASE_NAME: ${{ steps.window.outputs.window_database_name }}
+          TARGET_DATABASE_NAME: ${{ steps.window.outputs.target_database_name }}
         run: |
           set -euo pipefail
 
           if [ -z "${WINDOW_DB_ID:-}" ]; then
             echo "::error::Missing window Postgres ID."
+            exit 1
+          fi
+
+          if [ "${TARGET_DATABASE_NAME}" = "${WINDOW_DATABASE_NAME}" ]; then
+            echo "::error::Refusing to suspend '${WINDOW_DATABASE_NAME}' while it is still the target database."
             exit 1
           fi
 
