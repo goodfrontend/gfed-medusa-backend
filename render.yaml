@@ -23,7 +23,7 @@ projects:
                   property: database
         databases:
           - name: gfed-medusa-database
-            databaseName: gfed_medusa_database_free2
+            databaseName: gfed_medusa_database_free2_42qv
             user: gfed_medusa_database_free2_user
             plan: free
             region: frankfurt
