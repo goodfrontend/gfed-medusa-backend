@@ -45,7 +45,7 @@ projects:
         services:
           - type: web
             runtime: image
-            plan: starter
+            plan: free
             name: gfed-medusa-be-qa
             region: frankfurt
             autoDeployTrigger: off
@@ -57,7 +57,7 @@ projects:
         services:
           - type: web
             runtime: image
-            plan: starter
+            plan: free
             name: gfed-medusa-be-smoke
             region: frankfurt
             autoDeployTrigger: off
