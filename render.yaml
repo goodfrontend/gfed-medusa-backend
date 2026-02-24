@@ -5,7 +5,7 @@ projects:
         services:
           - type: web
             runtime: image
-            plan: free
+            plan: standard
             name: gfed-medusa-be
             region: singapore
             autoDeployTrigger: off
@@ -15,11 +15,11 @@ projects:
               - fromGroup: backend-env-group-prod
               - key: DATABASE_URL
                 fromDatabase:
-                  name: gfed-medusa-database
+                  name: gfed-medusa-database-paid
                   property: connectionString
               - key: DB_NAME
                 fromDatabase:
-                  name: gfed-medusa-database
+                  name: gfed-medusa-database-paid
                   property: database
         databases:
           - name: gfed-medusa-database
