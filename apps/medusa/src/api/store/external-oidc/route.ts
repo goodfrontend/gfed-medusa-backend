@@ -100,7 +100,7 @@ export const POST = async (
   }
 
   // 4️⃣ Generate Medusa JWT for the current authenticated customer
-  const jwt = generateJwtTokenForAuthIdentity(
+  const jwt = await generateJwtTokenForAuthIdentity(
     {
       authIdentity: authIdentityLinked,
       actorType: 'customer',
