@@ -7,7 +7,7 @@ projects:
             runtime: image
             plan: free
             name: gfed-medusa-be
-            region: singapore
+            region: frankfurt
             autoDeployTrigger: off
             image:
               url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:latest
@@ -23,20 +23,20 @@ projects:
                   property: database
         databases:
           - name: gfed-medusa-database
-            databaseName: gfed_medusa_database_abc1
-            user: gfed_medusa_database_abc1_user
+            databaseName: gfed_medusa_database_free2
+            user: gfed_medusa_database_free2_user
             plan: free
-            region: singapore
+            region: frankfurt
             ipAllowList:
               - source: 0.0.0.0/0
                 description: everywhere
             postgresMajorVersion: '18'
           - name: gfed-medusa-database-paid
-            databaseName: gfed_medusa_database_paid1
-            user: gfed_medusa_database_paid1_user
+            databaseName: gfed_medusa_database_paid2
+            user: gfed_medusa_database_paid2_user
             plan: basic-1gb
             diskSizeGB: 1
-            region: singapore
+            region: frankfurt
             ipAllowList:
               - source: 0.0.0.0/0
                 description: everywhere
