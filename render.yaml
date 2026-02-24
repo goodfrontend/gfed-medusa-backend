@@ -5,7 +5,7 @@ projects:
         services:
           - type: web
             runtime: image
-            plan: free
+            plan: starter
             name: gfed-medusa-be
             region: frankfurt
             autoDeployTrigger: off
