@@ -47,7 +47,7 @@ projects:
             runtime: image
             plan: free
             name: gfed-medusa-be-qa
-            region: singapore
+            region: frankfurt
             autoDeployTrigger: off
             image:
               url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:latest
@@ -59,7 +59,7 @@ projects:
             runtime: image
             plan: free
             name: gfed-medusa-be-smoke
-            region: singapore
+            region: frankfurt
             autoDeployTrigger: off
             image:
               url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:latest
