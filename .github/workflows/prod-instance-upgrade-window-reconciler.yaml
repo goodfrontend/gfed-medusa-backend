@@ -409,12 +409,14 @@ jobs:
           fi
 
           current_plan="$(echo "$detail_body" | jq -r '.plan // empty')"
-          echo "::notice::Current window DB plan: ${current_plan:-unknown}; target resume plan: ${WINDOW_DATABASE_RESUME_PLAN}"
+          current_plan_api="${current_plan//-/_}"
+          target_resume_plan_api="${WINDOW_DATABASE_RESUME_PLAN//-/_}"
+          echo "::notice::Current window DB plan: ${current_plan:-unknown}; target resume plan: ${WINDOW_DATABASE_RESUME_PLAN} (api=${target_resume_plan_api})"
 
-          if [ "${current_plan}" != "${WINDOW_DATABASE_RESUME_PLAN}" ]; then
-            echo "::notice::Updating window DB plan from '${current_plan:-unknown}' to '${WINDOW_DATABASE_RESUME_PLAN}' before resume."
+          if [ "${current_plan_api}" != "${target_resume_plan_api}" ]; then
+            echo "::notice::Updating window DB plan from '${current_plan:-unknown}' (api='${current_plan_api:-unknown}') to '${WINDOW_DATABASE_RESUME_PLAN}' (api='${target_resume_plan_api}') before resume."
 
-            patch_payload="$(jq -cn --arg plan "${WINDOW_DATABASE_RESUME_PLAN}" '{plan:$plan}')"
+            patch_payload="$(jq -cn --arg plan "${target_resume_plan_api}" '{plan:$plan}')"
             patch_resp="$(curl -sS -w "\n%{http_code}" \
               -X PATCH "https://api.render.com/v1/postgres/${WINDOW_DB_ID}" \
               -H "Authorization: Bearer ${RENDER_API_KEY}" \
@@ -425,7 +427,7 @@ jobs:
             patch_status="$(echo "$patch_resp" | tail -n 1)"
 
             if [ "$patch_status" -ge 300 ]; then
-              echo "::error::Failed to update Postgres '${WINDOW_DATABASE_NAME}' plan to '${WINDOW_DATABASE_RESUME_PLAN}' (HTTP ${patch_status})."
+              echo "::error::Failed to update Postgres '${WINDOW_DATABASE_NAME}' plan to '${WINDOW_DATABASE_RESUME_PLAN}' (api='${target_resume_plan_api}', HTTP ${patch_status})."
               echo "$patch_body"
               exit 1
             fi
