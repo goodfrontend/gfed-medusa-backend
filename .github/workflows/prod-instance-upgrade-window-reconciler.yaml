@@ -536,7 +536,7 @@ jobs:
           def find_production_bounds(lines_):
               start = None
               indent = None
-              env_pattern = re.compile(r'^(\s*)-\s+name:\s*("?)([^"\n]+)\2\s*$')
+              env_pattern = re.compile(r'^(\s*)-\s+name:\s*("?)([^"#\n]+)\2\s*(?:#.*)?$')
               for idx, line in enumerate(lines_):
                   m = env_pattern.match(line)
                   if not m:
@@ -584,7 +584,7 @@ jobs:
                       databases_start = idx
                       break
               if databases_start is None:
-                  raise SystemExit("Production databases block was not found in render.yaml.")
+                  return None, None, None
 
               databases_end = prod_end
               for idx in range(databases_start + 1, prod_end):
@@ -608,7 +608,7 @@ jobs:
                   raise SystemExit("No services were found in Production services block.")
 
               item_starts.append(services_end)
-              name_pattern = re.compile(r'^\s*name:\s*("?)([^"\n]+)\1\s*$')
+              name_pattern = re.compile(r'^\s*name:\s*("?)([^"#\n]+)\1\s*(?:#.*)?$')
 
               for i in range(len(item_starts) - 1):
                   start = item_starts[i]
@@ -621,6 +621,9 @@ jobs:
               raise SystemExit(f"Service '{target_service}' in Production services block was not found in {path}.")
 
           def find_database_item_bounds(lines_, databases_start, databases_end, databases_indent, target_database):
+              if databases_start is None or databases_end is None or databases_indent is None:
+                  return None, None, None
+
               item_indent = databases_indent + 2
               item_starts = []
               item_start_pattern = re.compile(r'^(\s*)-\s+\w+:\s*.*$')
@@ -631,10 +634,10 @@ jobs:
                       item_starts.append(idx)
 
               if not item_starts:
-                  raise SystemExit("No databases were found in Production databases block.")
+                  return None, None, None
 
               item_starts.append(databases_end)
-              name_pattern = re.compile(r'^\s*name:\s*("?)([^"\n]+)\1\s*$')
+              name_pattern = re.compile(r'^\s*name:\s*("?)([^"#\n]+)\1\s*(?:#.*)?$')
 
               for i in range(len(item_starts) - 1):
                   start = item_starts[i]
@@ -644,7 +647,7 @@ jobs:
                       if m and m.group(2).strip() == target_database:
                           return start, end, item_indent
 
-              raise SystemExit(f"Database '{target_database}' in Production databases block was not found in {path}.")
+              return None, None, None
 
           production_start, production_end, production_indent = find_production_bounds(lines)
           services_start, services_end, services_indent = find_services_bounds(lines, production_start, production_end, production_indent)
@@ -656,6 +659,7 @@ jobs:
           service_previous_plan = ""
           window_database_previous_plan = ""
           previous_database_binding = ""
+          window_database_plan_reconciled = "false"
 
           plan_pattern = re.compile(r'^(\s*plan:\s*)([^#\n]+?)(\s*(?:#.*)?)$')
           plan_idx = None
@@ -672,19 +676,27 @@ jobs:
           if plan_idx is None:
               raise SystemExit(f"Plan field for service '{service_name}' was not found.")
 
-          window_database_plan_idx = None
-          for idx in range(window_database_start, window_database_end):
-              line = lines[idx].rstrip("\n")
-              m = plan_pattern.match(line)
-              if m and indent_len(lines[idx]) >= window_database_item_indent + 2:
-                  window_database_plan_idx = idx
-                  window_database_previous_plan = m.group(2).strip().strip("'\"")
-                  if window_database_previous_plan != target_window_database_plan:
-                      lines[idx] = f"{m.group(1)}{target_window_database_plan}{m.group(3)}\n"
-                      changed = True
-                  break
-          if window_database_plan_idx is None:
-              raise SystemExit(f"Plan field for database '{window_database_name}' was not found.")
+          if window_database_start is None:
+              if databases_start is None:
+                  print("::warning::Production databases block was not found in render.yaml. Skipping window DB plan reconciliation in file.")
+              else:
+                  print(f"::warning::Database '{window_database_name}' in Production databases block was not found in render.yaml. Skipping window DB plan reconciliation in file.")
+          else:
+              window_database_plan_idx = None
+              for idx in range(window_database_start, window_database_end):
+                  line = lines[idx].rstrip("\n")
+                  m = plan_pattern.match(line)
+                  if m and indent_len(lines[idx]) >= window_database_item_indent + 2:
+                      window_database_plan_idx = idx
+                      window_database_previous_plan = m.group(2).strip().strip("'\"")
+                      if window_database_previous_plan != target_window_database_plan:
+                          lines[idx] = f"{m.group(1)}{target_window_database_plan}{m.group(3)}\n"
+                          changed = True
+                      break
+              if window_database_plan_idx is None:
+                  print(f"::warning::Plan field for database '{window_database_name}' was not found in render.yaml. Skipping window DB plan reconciliation in file.")
+              else:
+                  window_database_plan_reconciled = "true"
 
           field_indent = service_item_indent + 2
           env_header_idx = None
@@ -777,6 +789,7 @@ jobs:
               out.write(f"service_target_plan={target_service_plan}\n")
               out.write(f"window_database_previous_plan={window_database_previous_plan}\n")
               out.write(f"window_database_target_plan={target_window_database_plan}\n")
+              out.write(f"window_database_plan_reconciled={window_database_plan_reconciled}\n")
               out.write(f"target_database_name={target_database_name}\n")
               out.write(f"database_binding_before={previous_database_binding}\n")
           PY
