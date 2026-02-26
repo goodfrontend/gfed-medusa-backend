@@ -16,7 +16,7 @@ on:
           - pro max ($225/month, 16 GB RAM, 4 CPU)
           - pro ultra ($450/month, 32 GB RAM, 8 CPU)
       paid_database_resume_plan:
-        description: 'Render paid database plan'
+        description: 'Render database plan'
         required: false
         default: basic-1gb ($19/month, 1 GB RAM, 0.5 CPU)
         type: choice
