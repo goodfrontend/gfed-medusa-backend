@@ -386,7 +386,6 @@ jobs:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           WINDOW_DB_ID: ${{ steps.postgres.outputs.window_db_id }}
           WINDOW_DATABASE_NAME: ${{ steps.window.outputs.window_database_name }}
-          WINDOW_DATABASE_RESUME_PLAN: ${{ steps.window.outputs.window_database_resume_plan }}
         run: |
           set -euo pipefail
 
@@ -409,36 +408,7 @@ jobs:
           fi
 
           current_plan="$(echo "$detail_body" | jq -r '.plan // empty')"
-          current_plan_api="${current_plan//-/_}"
-          target_resume_plan_api="${WINDOW_DATABASE_RESUME_PLAN//-/_}"
-          echo "::notice::Current window DB plan: ${current_plan:-unknown}; target resume plan: ${WINDOW_DATABASE_RESUME_PLAN} (api=${target_resume_plan_api})"
-
-          if [ "${current_plan_api}" != "${target_resume_plan_api}" ]; then
-            echo "::notice::Updating window DB plan from '${current_plan:-unknown}' (api='${current_plan_api:-unknown}') to '${WINDOW_DATABASE_RESUME_PLAN}' (api='${target_resume_plan_api}') before resume."
-
-            patch_payload="$(jq -cn --arg plan "${target_resume_plan_api}" '{plan:$plan}')"
-            patch_resp="$(curl -sS -w "\n%{http_code}" \
-              -X PATCH "https://api.render.com/v1/postgres/${WINDOW_DB_ID}" \
-              -H "Authorization: Bearer ${RENDER_API_KEY}" \
-              -H "Accept: application/json" \
-              -H "Content-Type: application/json" \
-              -d "$patch_payload")"
-            patch_body="$(echo "$patch_resp" | head -n -1)"
-            patch_status="$(echo "$patch_resp" | tail -n 1)"
-
-            if [ "$patch_status" -ge 300 ]; then
-              echo "::error::Failed to update Postgres '${WINDOW_DATABASE_NAME}' plan to '${WINDOW_DATABASE_RESUME_PLAN}' (api='${target_resume_plan_api}', HTTP ${patch_status})."
-              echo "$patch_body"
-              exit 1
-            fi
-
-            patched_plan="$(echo "$patch_body" | jq -r '.plan // empty')"
-            if [ -n "$patched_plan" ]; then
-              echo "::notice::Render accepted DB plan update; current reported plan: ${patched_plan}."
-            else
-              echo "::notice::Render accepted DB plan update request."
-            fi
-          fi
+          echo "::notice::Current window DB plan: ${current_plan:-unknown}. Plan reconciliation is managed through render.yaml and Render Blueprint sync."
 
           current_suspended="$(echo "$detail_body" | jq -r '.suspended // empty')"
           echo "::notice::Current window DB suspended state: ${current_suspended}"
@@ -608,7 +578,7 @@ jobs:
                   raise SystemExit("No services were found in Production services block.")
 
               item_starts.append(services_end)
-              name_pattern = re.compile(r'^\s*name:\s*("?)([^"#\n]+)\1\s*(?:#.*)?$')
+              name_pattern = re.compile(r'^\s*(?:-\s+)?name:\s*("?)([^"#\n]+)\1\s*(?:#.*)?$')
 
               for i in range(len(item_starts) - 1):
                   start = item_starts[i]
@@ -637,7 +607,7 @@ jobs:
                   return None, None, None
 
               item_starts.append(databases_end)
-              name_pattern = re.compile(r'^\s*name:\s*("?)([^"#\n]+)\1\s*(?:#.*)?$')
+              name_pattern = re.compile(r'^\s*(?:-\s+)?name:\s*("?)([^"#\n]+)\1\s*(?:#.*)?$')
 
               for i in range(len(item_starts) - 1):
                   start = item_starts[i]
