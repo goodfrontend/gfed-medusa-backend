@@ -22,7 +22,7 @@ on:
       timezone:
         description: "IANA timezone (for example: UTC, Europe/London, Asia/Manila)"
         required: false
-        default: UTC
+        default: Asia/Manila
         type: string
 
 permissions:
