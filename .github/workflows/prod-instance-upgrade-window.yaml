@@ -15,6 +15,18 @@ on:
           - pro plus ($175/month, 8 GB RAM, 4 CPU)
           - pro max ($225/month, 16 GB RAM, 4 CPU)
           - pro ultra ($450/month, 32 GB RAM, 8 CPU)
+      paid_database_resume_plan:
+        description: 'Render paid database plan'
+        required: false
+        default: basic-1gb ($19/month, 1 GB RAM, 0.5 CPU)
+        type: choice
+        options:
+          - basic-256mb ($6/month, 256 MB RAM, 0.1 CPU)
+          - basic-1gb ($19/month, 1 GB RAM, 0.5 CPU)
+          - basic-4gb ($75/month, 4 GB RAM, 2 CPU)
+          - pro-4gb ($55/month, 4 GB RAM, 1 CPU)
+          - pro-8gb ($100/month, 8 GB RAM, 2 CPU)
+          - pro-16gb ($200/month, 16 GB RAM, 4 CPU)
       start_mode:
         description: 'Window start mode (scheduled uses start_datetime, immediate starts now)'
         required: false
@@ -58,6 +70,7 @@ jobs:
           END_DATETIME: ${{ inputs.end_datetime }}
           TIMEZONE_NAME: ${{ inputs.timezone }}
           WEB_SERVICE_UPGRADE_PLAN: ${{ inputs.web_service_upgrade_plan }}
+          WINDOW_DATABASE_RESUME_PLAN: ${{ inputs.paid_database_resume_plan }}
         run: |
           set -euo pipefail
 
@@ -73,9 +86,12 @@ jobs:
           end_raw = os.environ["END_DATETIME"].strip()
           tz_name = os.environ["TIMEZONE_NAME"].strip() or "UTC"
           target_service_plan_input = os.environ.get("WEB_SERVICE_UPGRADE_PLAN", "").strip()
+          target_database_resume_plan_input = os.environ.get("WINDOW_DATABASE_RESUME_PLAN", "").strip()
 
           if not target_service_plan_input:
               raise SystemExit("web_service_upgrade_plan must not be empty.")
+          if not target_database_resume_plan_input:
+              raise SystemExit("paid_database_resume_plan must not be empty.")
 
           target_service_plan = re.sub(r"\s*\(.*\)\s*$", "", target_service_plan_input).strip().lower()
           valid_service_plans = {"free", "starter", "standard", "pro", "pro plus", "pro max", "pro ultra"}
@@ -83,6 +99,14 @@ jobs:
               raise SystemExit(
                   "web_service_upgrade_plan must resolve to one of: "
                   + ", ".join(sorted(valid_service_plans))
+              )
+
+          target_database_resume_plan = re.sub(r"\s*\(.*\)\s*$", "", target_database_resume_plan_input).strip().lower()
+          valid_database_resume_plans = {"basic-256mb", "basic-1gb", "basic-4gb", "pro-4gb", "pro-8gb", "pro-16gb"}
+          if target_database_resume_plan not in valid_database_resume_plans:
+              raise SystemExit(
+                  "paid_database_resume_plan must resolve to one of: "
+                  + ", ".join(sorted(valid_database_resume_plans))
               )
 
           try:
@@ -139,6 +163,8 @@ jobs:
               "service_to_plan": target_service_plan,
               "default_database_name": "gfed-medusa-database",
               "window_database_name": "gfed-medusa-database-paid",
+              "window_database_resume_plan": target_database_resume_plan,
+              "window_database_plan": target_database_resume_plan,
               "resume_window_database_inside_window": True,
               "suspend_window_database_outside_window": True,
               "database_url_env_key": "DATABASE_URL",
@@ -172,6 +198,7 @@ jobs:
           summary = [
               f"Configured window for service: {payload['service_name']}",
               f"Selected upgrade plan option: {target_service_plan_input}",
+              f"Selected paid DB resume plan option: {target_database_resume_plan_input}",
               f"Service plan window: {payload['service_from_plan']} -> {payload['service_to_plan']} -> {payload['service_from_plan']}",
               f"Database switch window: {payload['default_database_name']} -> {payload['window_database_name']} -> {payload['default_database_name']}",
               "Paid DB lifecycle: resume inside window, suspend outside window",

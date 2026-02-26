@@ -92,6 +92,7 @@ jobs:
           service_to_plan="$(jq -r '.service_to_plan // .to_plan // empty' window.json)"
           default_database_name="$(jq -r '.default_database_name // .database_name // "gfed-medusa-database"' window.json)"
           window_database_name="$(jq -r '.window_database_name // "gfed-medusa-database-paid"' window.json)"
+          window_database_resume_plan="$(jq -r '.window_database_resume_plan // .window_database_plan // "basic-1gb"' window.json)"
           resume_window_database_inside_window="$(jq -r '.resume_window_database_inside_window // true' window.json)"
           suspend_window_database_outside_window="$(jq -r '.suspend_window_database_outside_window // true' window.json)"
           database_url_env_key="$(jq -r '.database_url_env_key // "DATABASE_URL"' window.json)"
@@ -101,7 +102,7 @@ jobs:
           start_utc="$(jq -r '.start_utc // empty' window.json)"
           end_utc="$(jq -r '.end_utc // empty' window.json)"
 
-          if [ -z "$service_name" ] || [ -z "$service_from_plan" ] || [ -z "$service_to_plan" ] || [ -z "$default_database_name" ] || [ -z "$window_database_name" ] || [ -z "$database_url_env_key" ] || [ -z "$database_name_env_key" ] || [ -z "$start_epoch" ]; then
+          if [ -z "$service_name" ] || [ -z "$service_from_plan" ] || [ -z "$service_to_plan" ] || [ -z "$default_database_name" ] || [ -z "$window_database_name" ] || [ -z "$window_database_resume_plan" ] || [ -z "$database_url_env_key" ] || [ -z "$database_name_env_key" ] || [ -z "$start_epoch" ]; then
             echo "::error::Window payload is missing required fields."
             cat window.json
             exit 1
@@ -139,6 +140,14 @@ jobs:
               ;;
           esac
 
+          case "$window_database_resume_plan" in
+            (basic-256mb|basic-1gb|basic-4gb|pro-4gb|pro-8gb|pro-16gb) ;;
+            (*)
+              echo "::error::window_database_resume_plan must be one of: basic-256mb, basic-1gb, basic-4gb, pro-4gb, pro-8gb, pro-16gb."
+              exit 1
+              ;;
+          esac
+
           now_epoch="$(date -u +%s)"
           now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -156,7 +165,7 @@ jobs:
             target_database_name="$window_database_name"
           fi
 
-          echo "::notice::Current phase: ${phase}; target service plan: ${target_service_plan}; target database routing: ${target_database_name}; resume_window_database_inside_window=${resume_window_database_inside_window}; suspend_window_database_outside_window=${suspend_window_database_outside_window}"
+          echo "::notice::Current phase: ${phase}; target service plan: ${target_service_plan}; target database routing: ${target_database_name}; target window DB plan on resume: ${window_database_resume_plan}; resume_window_database_inside_window=${resume_window_database_inside_window}; suspend_window_database_outside_window=${suspend_window_database_outside_window}"
           {
             echo "configured=true"
             echo "artifact_id=$artifact_id"
@@ -164,6 +173,7 @@ jobs:
             echo "service_name=$service_name"
             echo "default_database_name=$default_database_name"
             echo "window_database_name=$window_database_name"
+            echo "window_database_resume_plan=$window_database_resume_plan"
             echo "resume_window_database_inside_window=$resume_window_database_inside_window"
             echo "suspend_window_database_outside_window=$suspend_window_database_outside_window"
             echo "database_url_env_key=$database_url_env_key"
@@ -376,6 +386,7 @@ jobs:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           WINDOW_DB_ID: ${{ steps.postgres.outputs.window_db_id }}
           WINDOW_DATABASE_NAME: ${{ steps.window.outputs.window_database_name }}
+          WINDOW_DATABASE_RESUME_PLAN: ${{ steps.window.outputs.window_database_resume_plan }}
         run: |
           set -euo pipefail
 
@@ -395,6 +406,36 @@ jobs:
             echo "::error::Failed to fetch Postgres '${WINDOW_DATABASE_NAME}' (HTTP ${detail_status})."
             echo "$detail_body"
             exit 1
+          fi
+
+          current_plan="$(echo "$detail_body" | jq -r '.plan // empty')"
+          echo "::notice::Current window DB plan: ${current_plan:-unknown}; target resume plan: ${WINDOW_DATABASE_RESUME_PLAN}"
+
+          if [ "${current_plan}" != "${WINDOW_DATABASE_RESUME_PLAN}" ]; then
+            echo "::notice::Updating window DB plan from '${current_plan:-unknown}' to '${WINDOW_DATABASE_RESUME_PLAN}' before resume."
+
+            patch_payload="$(jq -cn --arg plan "${WINDOW_DATABASE_RESUME_PLAN}" '{plan:$plan}')"
+            patch_resp="$(curl -sS -w "\n%{http_code}" \
+              -X PATCH "https://api.render.com/v1/postgres/${WINDOW_DB_ID}" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              -d "$patch_payload")"
+            patch_body="$(echo "$patch_resp" | head -n -1)"
+            patch_status="$(echo "$patch_resp" | tail -n 1)"
+
+            if [ "$patch_status" -ge 300 ]; then
+              echo "::error::Failed to update Postgres '${WINDOW_DATABASE_NAME}' plan to '${WINDOW_DATABASE_RESUME_PLAN}' (HTTP ${patch_status})."
+              echo "$patch_body"
+              exit 1
+            fi
+
+            patched_plan="$(echo "$patch_body" | jq -r '.plan // empty')"
+            if [ -n "$patched_plan" ]; then
+              echo "::notice::Render accepted DB plan update; current reported plan: ${patched_plan}."
+            else
+              echo "::notice::Render accepted DB plan update request."
+            fi
           fi
 
           current_suspended="$(echo "$detail_body" | jq -r '.suspended // empty')"
@@ -455,6 +496,8 @@ jobs:
           SERVICE_NAME: ${{ steps.window.outputs.service_name }}
           TARGET_SERVICE_PLAN: ${{ steps.window.outputs.target_service_plan }}
           TARGET_DATABASE_NAME: ${{ steps.window.outputs.target_database_name }}
+          WINDOW_DATABASE_NAME: ${{ steps.window.outputs.window_database_name }}
+          TARGET_WINDOW_DATABASE_PLAN: ${{ steps.window.outputs.window_database_resume_plan }}
           DATABASE_URL_ENV_KEY: ${{ steps.window.outputs.database_url_env_key }}
           DATABASE_NAME_ENV_KEY: ${{ steps.window.outputs.database_name_env_key }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -474,11 +517,13 @@ jobs:
           service_name = os.environ["SERVICE_NAME"].strip()
           target_service_plan = os.environ["TARGET_SERVICE_PLAN"].strip()
           target_database_name = os.environ["TARGET_DATABASE_NAME"].strip()
+          window_database_name = os.environ["WINDOW_DATABASE_NAME"].strip()
+          target_window_database_plan = os.environ["TARGET_WINDOW_DATABASE_PLAN"].strip()
           database_url_env_key = os.environ["DATABASE_URL_ENV_KEY"].strip()
           database_name_env_key = os.environ["DATABASE_NAME_ENV_KEY"].strip()
 
-          if not service_name or not target_service_plan or not target_database_name or not database_url_env_key or not database_name_env_key:
-              raise SystemExit("SERVICE_NAME, TARGET_SERVICE_PLAN, TARGET_DATABASE_NAME, DATABASE_URL_ENV_KEY, and DATABASE_NAME_ENV_KEY are required.")
+          if not service_name or not target_service_plan or not target_database_name or not window_database_name or not target_window_database_plan or not database_url_env_key or not database_name_env_key:
+              raise SystemExit("SERVICE_NAME, TARGET_SERVICE_PLAN, TARGET_DATABASE_NAME, WINDOW_DATABASE_NAME, TARGET_WINDOW_DATABASE_PLAN, DATABASE_URL_ENV_KEY, and DATABASE_NAME_ENV_KEY are required.")
 
           with open(path, "r", encoding="utf-8") as f:
               lines = f.readlines()
@@ -529,6 +574,24 @@ jobs:
                       break
               return services_start, services_end, services_indent
 
+          def find_databases_bounds(lines_, prod_start, prod_end, prod_indent):
+              databases_indent = prod_indent + 2
+              databases_start = None
+              for idx in range(prod_start + 1, prod_end):
+                  if lines_[idx].strip() == "databases:" and indent_len(lines_[idx]) == databases_indent:
+                      databases_start = idx
+                      break
+              if databases_start is None:
+                  raise SystemExit("Production databases block was not found in render.yaml.")
+
+              databases_end = prod_end
+              for idx in range(databases_start + 1, prod_end):
+                  stripped = lines_[idx].strip()
+                  if stripped and not stripped.startswith("#") and indent_len(lines_[idx]) <= databases_indent:
+                      databases_end = idx
+                      break
+              return databases_start, databases_end, databases_indent
+
           def find_service_item_bounds(lines_, services_start, services_end, services_indent, target_service):
               item_indent = services_indent + 2
               item_starts = []
@@ -555,12 +618,41 @@ jobs:
 
               raise SystemExit(f"Service '{target_service}' in Production services block was not found in {path}.")
 
+          def find_database_item_bounds(lines_, databases_start, databases_end, databases_indent, target_database):
+              item_indent = databases_indent + 2
+              item_starts = []
+              item_start_pattern = re.compile(r'^(\s*)-\s+\w+:\s*.*$')
+
+              for idx in range(databases_start + 1, databases_end):
+                  m = item_start_pattern.match(lines_[idx])
+                  if m and len(m.group(1)) == item_indent:
+                      item_starts.append(idx)
+
+              if not item_starts:
+                  raise SystemExit("No databases were found in Production databases block.")
+
+              item_starts.append(databases_end)
+              name_pattern = re.compile(r'^\s*name:\s*("?)([^"\n]+)\1\s*$')
+
+              for i in range(len(item_starts) - 1):
+                  start = item_starts[i]
+                  end = item_starts[i + 1]
+                  for idx in range(start, end):
+                      m = name_pattern.match(lines_[idx])
+                      if m and m.group(2).strip() == target_database:
+                          return start, end, item_indent
+
+              raise SystemExit(f"Database '{target_database}' in Production databases block was not found in {path}.")
+
           production_start, production_end, production_indent = find_production_bounds(lines)
           services_start, services_end, services_indent = find_services_bounds(lines, production_start, production_end, production_indent)
+          databases_start, databases_end, databases_indent = find_databases_bounds(lines, production_start, production_end, production_indent)
           service_start, service_end, service_item_indent = find_service_item_bounds(lines, services_start, services_end, services_indent, service_name)
+          window_database_start, window_database_end, window_database_item_indent = find_database_item_bounds(lines, databases_start, databases_end, databases_indent, window_database_name)
 
           changed = False
           service_previous_plan = ""
+          window_database_previous_plan = ""
           previous_database_binding = ""
 
           plan_pattern = re.compile(r'^(\s*plan:\s*)([^#\n]+?)(\s*(?:#.*)?)$')
@@ -577,6 +669,20 @@ jobs:
                   break
           if plan_idx is None:
               raise SystemExit(f"Plan field for service '{service_name}' was not found.")
+
+          window_database_plan_idx = None
+          for idx in range(window_database_start, window_database_end):
+              line = lines[idx].rstrip("\n")
+              m = plan_pattern.match(line)
+              if m and indent_len(lines[idx]) >= window_database_item_indent + 2:
+                  window_database_plan_idx = idx
+                  window_database_previous_plan = m.group(2).strip().strip("'\"")
+                  if window_database_previous_plan != target_window_database_plan:
+                      lines[idx] = f"{m.group(1)}{target_window_database_plan}{m.group(3)}\n"
+                      changed = True
+                  break
+          if window_database_plan_idx is None:
+              raise SystemExit(f"Plan field for database '{window_database_name}' was not found.")
 
           field_indent = service_item_indent + 2
           env_header_idx = None
@@ -667,11 +773,13 @@ jobs:
               out.write(f"changed={'true' if changed else 'false'}\n")
               out.write(f"service_previous_plan={service_previous_plan}\n")
               out.write(f"service_target_plan={target_service_plan}\n")
+              out.write(f"window_database_previous_plan={window_database_previous_plan}\n")
+              out.write(f"window_database_target_plan={target_window_database_plan}\n")
               out.write(f"target_database_name={target_database_name}\n")
               out.write(f"database_binding_before={previous_database_binding}\n")
           PY
 
-          echo "::notice::render.yaml reconciliation completed for service ${SERVICE_NAME} (plan '${TARGET_SERVICE_PLAN}') and database routing '${TARGET_DATABASE_NAME}' via env keys '${DATABASE_URL_ENV_KEY}' and '${DATABASE_NAME_ENV_KEY}'."
+          echo "::notice::render.yaml reconciliation completed for service ${SERVICE_NAME} (plan '${TARGET_SERVICE_PLAN}'), window DB ${WINDOW_DATABASE_NAME} (plan '${TARGET_WINDOW_DATABASE_PLAN}'), and database routing '${TARGET_DATABASE_NAME}' via env keys '${DATABASE_URL_ENV_KEY}' and '${DATABASE_NAME_ENV_KEY}'."
 
       - name: Commit and push render.yaml plan changes
         if: steps.window.outputs.configured == 'true' && steps.file-plan.outputs.changed == 'true'
@@ -680,6 +788,8 @@ jobs:
           SERVICE_NAME: ${{ steps.window.outputs.service_name }}
           TARGET_SERVICE_PLAN: ${{ steps.window.outputs.target_service_plan }}
           TARGET_DATABASE_NAME: ${{ steps.window.outputs.target_database_name }}
+          WINDOW_DATABASE_NAME: ${{ steps.window.outputs.window_database_name }}
+          TARGET_WINDOW_DATABASE_PLAN: ${{ steps.window.outputs.window_database_resume_plan }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
@@ -690,7 +800,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add render.yaml
-          git commit -m "chore(render): set ${SERVICE_NAME} plan to ${TARGET_SERVICE_PLAN} and route DB to ${TARGET_DATABASE_NAME} for upgrade window [skip ci]"
+          git commit -m "chore(render): set ${SERVICE_NAME} plan to ${TARGET_SERVICE_PLAN}, route DB to ${TARGET_DATABASE_NAME}, and set ${WINDOW_DATABASE_NAME} plan to ${TARGET_WINDOW_DATABASE_PLAN} for upgrade window [skip ci]"
 
           attempt=1
           max_attempts=3
