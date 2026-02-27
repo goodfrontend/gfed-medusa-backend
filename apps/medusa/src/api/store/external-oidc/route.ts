@@ -31,9 +31,7 @@ export const POST = async (
   );
 
   // 1️⃣ Get payload from provided auth idToken
-  const jwks = jose.createRemoteJWKSet(
-    new URL(`${process.env.AUTH_ISSUER}/.well-known/jwks.json`)
-  );
+  const jwks = jose.createRemoteJWKSet(new URL(`${process.env.AUTH_JWKS_URI}`));
 
   const { payload } = await jose.jwtVerify(idToken, jwks, {
     issuer: process.env.AUTH_ISSUER,
