@@ -32,8 +32,8 @@ projects:
                 description: everywhere
             postgresMajorVersion: '18'
           - name: gfed-medusa-database-paid
-            databaseName: gfed_medusa_database_paid5
-            user: gfed_medusa_database_paid5_user
+            databaseName: gfed_medusa_database_paid6
+            user: gfed_medusa_database_paid6_user
             plan: basic-1gb
             diskSizeGB: 1
             region: frankfurt
