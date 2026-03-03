@@ -23,8 +23,8 @@ projects:
                   property: database
         databases:
           - name: gfed-medusa-database
-            databaseName: gfed_medusa_database_free5
-            user: gfed_medusa_database_free5_user
+            databaseName: gfed_medusa_database_free6
+            user: gfed_medusa_database_free6_user
             plan: free
             region: frankfurt
             ipAllowList:
