@@ -10,7 +10,7 @@ projects:
             region: frankfurt
             autoDeployTrigger: off
             image:
-              url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:latest
+              url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:prod-latest
             envVars:
               - fromGroup: backend-env-group-prod
               - key: DATABASE_URL
@@ -50,7 +50,7 @@ projects:
             region: frankfurt
             autoDeployTrigger: off
             image:
-              url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:latest
+              url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:qa-latest
             envVars:
               - fromGroup: backend-env-group-qa
       - name: Smoke
@@ -62,6 +62,6 @@ projects:
             region: frankfurt
             autoDeployTrigger: off
             image:
-              url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:latest
+              url: ghcr.io/goodfrontend/gfed-medusa-backend/medusa:smoke-latest
             envVars:
               - fromGroup: backend-env-group-smoke

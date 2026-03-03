@@ -99,7 +99,7 @@ jobs:
             echo "::warning::• Test thoroughly after rollback"
           fi
 
-          SERVICE_NAME="medusa-prod"
+          SERVICE_NAME="gfed-medusa-be"
           IMAGE_TAG="ghcr.io/${{ github.repository }}/medusa:$TAG_COMMIT"
           {
             echo "image_tag=$IMAGE_TAG"
@@ -208,6 +208,10 @@ jobs:
     name: Rollback medusa to v${{ needs.validate.outputs.version }} in production
     needs: [validate, check-migrations-warning]
     if: needs.validate.outputs.has_migrations != 'true'
+    permissions:
+      contents: read
+      deployments: write
+      packages: write
     uses: ./.github/workflows/_deploy-render.yaml
     with:
       environment_name: production
