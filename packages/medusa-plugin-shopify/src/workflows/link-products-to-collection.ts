@@ -3,7 +3,6 @@ import {
   createWorkflow,
   transform,
 } from '@medusajs/framework/workflows-sdk';
-import { batchLinkProductsToCollectionWorkflow } from '@medusajs/medusa/core-flows';
 
 import { ShopifyCollection } from '../modules/shopify/types';
 import { retrieveOrCreateCollectionWorkflow } from './retrieve-or-create-collection';
@@ -83,13 +82,9 @@ export const linkProductsToCollectionWorkflow = createWorkflow(
       data.existingProducts.map((existingProduct) => existingProduct.id)
     );
 
-    batchLinkProductsToCollectionWorkflow.runAsStep({
-      input: {
-        id: medusaCollectionId,
-        add: productsInCollectionIds,
-      },
+    return new WorkflowResponse({
+      collectionId: medusaCollectionId,
+      productIds: productsInCollectionIds,
     });
-
-    return new WorkflowResponse({ done: true });
   }
 );
