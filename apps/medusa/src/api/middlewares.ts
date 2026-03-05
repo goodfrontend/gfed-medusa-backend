@@ -14,7 +14,16 @@ import {
   CartRedeemReward,
   CartUnredeemReward,
 } from './store/carts/[id]/redeem-reward/validators';
+import { StoreGetCollectionsWithProductsParams } from './store/collections-with-products/validators';
 import { PostStoreCreateWishlistItem } from './store/customers/me/wishlists/items/validators';
+
+const DEFAULT_STORE_COLLECTION_FIELDS = [
+  'id',
+  'title',
+  'handle',
+  'created_at',
+  'updated_at',
+];
 
 export const GetRewardsSchema = createFindParams();
 
@@ -54,6 +63,17 @@ export default defineMiddlewares({
       matcher: '/store/carts/:id/redeem-reward',
       method: 'DELETE',
       middlewares: [validateAndTransformBody(CartUnredeemReward)],
+    },
+    {
+      matcher: '/store/collections-with-products',
+      method: 'GET',
+      middlewares: [
+        validateAndTransformQuery(StoreGetCollectionsWithProductsParams, {
+          defaults: DEFAULT_STORE_COLLECTION_FIELDS,
+          defaultLimit: 10,
+          isList: true,
+        }),
+      ],
     },
     {
       matcher: '/store/customers/me/wishlists/items',
