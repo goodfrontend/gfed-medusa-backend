@@ -16,6 +16,7 @@
     "predeploy": "medusa db:migrate",
     "build": "cd ../../packages/medusa-plugin-shopify && npx medusa plugin:publish && cd ../../apps/medusa && npx medusa build",
     "build:prod": "cd ../../packages/medusa-plugin-shopify && pnpm install && npx medusa plugin:publish && cd ../../apps/medusa && npx medusa build && cd .medusa/server && pnpm install --no-frozen-lockfile",
+    "db:attach:stripe": "medusa exec ./src/scripts/attach-stripe-to-regions.ts",
     "db:seed:stock": "medusa exec ./src/scripts/seed-stock.ts",
     "seed": "medusa exec ./src/scripts/seed.ts",
     "start": "NODE_ENV=development medusa start",

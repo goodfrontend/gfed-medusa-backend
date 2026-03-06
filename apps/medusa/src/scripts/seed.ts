@@ -27,6 +27,11 @@ export default async function seedDemoData({ container }: ExecArgs) {
   const fulfillmentModuleService = container.resolve(Modules.FULFILLMENT);
   const salesChannelModuleService = container.resolve(Modules.SALES_CHANNEL);
   const storeModuleService = container.resolve(Modules.STORE);
+  const paymentProviders = ['pp_system_default'];
+
+  if (process.env.STRIPE_API_KEY) {
+    paymentProviders.push('pp_stripe_stripe');
+  }
 
   const countries = ['gb', 'de', 'dk', 'se', 'fr', 'es', 'it'];
 
@@ -77,7 +82,7 @@ export default async function seedDemoData({ container }: ExecArgs) {
           name: 'Europe',
           currency_code: 'eur',
           countries,
-          payment_providers: ['pp_system_default'],
+          payment_providers: paymentProviders,
         },
       ],
     },
