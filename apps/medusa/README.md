@@ -43,6 +43,10 @@
      pnpm run seed
      ```
 
+   If you want Stripe checkout enabled locally, also set `STRIPE_API_KEY` in `.env` before running `pnpm run seed`. Add `STRIPE_WEBHOOK_SECRET` when you want Stripe webhooks verified as well. The seed script attaches Stripe (`pp_stripe_stripe`) to the seeded region when `STRIPE_API_KEY` is present.
+
+   If your database was already seeded before Stripe was configured, run `pnpm run db:attach:stripe` to attach Stripe to all existing regions without reseeding.
+
 3. Publish `@gfed-medusa-backend/medusa-plugin-shopify` plugin locally. Follow `packages/medusa-plugin-shopify` README's [Get Started](../../packages/medusa-plugin-shopify/README.md#get-started) section.
 
 4. Start the development server:
@@ -91,6 +95,8 @@ pnpm run db:seed:stock
 
 - Build a production image locally with `docker build -f apps/medusa/Dockerfile -t medusa-app .`. The image runs migrations (`pnpm run predeploy`) before starting the server.
 - Required runtime env vars: `DATABASE_URL`, `STORE_CORS`, `ADMIN_CORS`, `AUTH_CORS`, `JWT_SECRET`, `COOKIE_SECRET`, `MEDUSA_BACKEND_URL`, `VITE_MEDUSA_BACKEND_URL`, and `PORT` (Render sets `PORT` automatically). Optional: `REDIS_URL` (enable if you add Redis), Algolia, and Shopify settings.
+- Add `STRIPE_API_KEY` to enable the Stripe payment provider.
+- Add `STRIPE_WEBHOOK_SECRET` so Stripe can verify webhook calls to `/hooks/payment/stripe_stripe`.
 - Example local run against an external Postgres: `docker run --env-file apps/medusa/.env.docker -p 9000:9000 medusa-app` (add `REDIS_URL` if you enable Redis).
 - Render: create a Web Service using Docker, set `Dockerfile Path` to `apps/medusa/Dockerfile` and `Context` to the repo root, attach Render Postgres URL (v18) to `DATABASE_URL`, and keep `PORT` set to Render's provided value. Add Redis later by setting `REDIS_URL` to your Render Redis URL. The default container command already runs migrations before `pnpm run start:prod`.
 
