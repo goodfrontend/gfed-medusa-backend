@@ -1,7 +1,6 @@
-import type { Knex } from '@mikro-orm/knex';
-
 import type { MedusaRequest, MedusaResponse } from '@medusajs/framework/http';
 import { ContainerRegistrationKeys } from '@medusajs/framework/utils';
+import type { Knex } from '@mikro-orm/knex';
 
 import type { StoreGetCollectionsWithProductsParamsType } from './validators';
 
