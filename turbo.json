@@ -1,5 +1,9 @@
 {
   "$schema": "https://turborepo.com/schema.json",
+  "globalEnv": [
+    "SEED_SAMPLE_CATALOG",
+    "STRIPE_API_KEY"
+  ],
   "ui": "tui",
   "tasks": {
     "build": {
