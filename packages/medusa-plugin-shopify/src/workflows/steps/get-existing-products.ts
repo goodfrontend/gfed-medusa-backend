@@ -27,7 +27,7 @@ export const getExistingProductsStep = createStep(
       const productsResponse = await productModuleService.listProducts(
         filters,
         {
-          relations: ['options', 'images', 'variants'],
+          relations: ['options', 'images', 'variants', 'categories'],
           take,
           skip,
         }

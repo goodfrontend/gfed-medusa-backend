@@ -10,7 +10,11 @@ import type {
 } from '@medusajs/framework/types';
 import { StepResponse, createStep } from '@medusajs/framework/workflows-sdk';
 
-import { sanitizeHandle } from '../../lib/utils';
+import {
+  classifyShopifyProductGender,
+  sanitizeHandle,
+  ShopifyProductGender,
+} from '../../lib/utils';
 import { ShopifyProduct } from '../../modules/shopify/types';
 
 type PrepareProductsForImportStepInput = {
@@ -20,6 +24,7 @@ type PrepareProductsForImportStepInput = {
   existingProducts: ProductDTO[];
   productTags: ProductTagDTO[];
   productTypes: ProductTypeDTO[];
+  genderCategoryIds: Record<ShopifyProductGender, string>;
 };
 
 export const prepareProductsForImportStep = createStep(
@@ -31,6 +36,7 @@ export const prepareProductsForImportStep = createStep(
     existingProducts,
     productTags,
     productTypes,
+    genderCategoryIds,
   }: PrepareProductsForImportStepInput) => {
     const productsToCreate = new Map<string, CreateProductWorkflowInputDTO>();
     const productsToUpdate = new Map<string, UpsertProductDTO>();
@@ -50,6 +56,7 @@ export const prepareProductsForImportStep = createStep(
       string,
       Record<string, unknown>
     >();
+    const managedGenderCategoryIds = new Set(Object.values(genderCategoryIds));
 
     products.forEach((shopifyProduct) => {
       const shopifyProductId = shopifyProduct.id.toString();
@@ -63,6 +70,18 @@ export const prepareProductsForImportStep = createStep(
       const typeToLink = productTypes.find(
         (type) => type.value === shopifyProduct.product_type
       );
+      const productGender = classifyShopifyProductGender(shopifyProduct);
+      const existingNonGenderCategoryIds =
+        existingProduct?.categories
+          ?.map((category) => category.id)
+          .filter((categoryId) => !managedGenderCategoryIds.has(categoryId)) ??
+        [];
+      const productCategoryIds = productGender
+        ? [
+            ...existingNonGenderCategoryIds,
+            genderCategoryIds[productGender],
+          ]
+        : undefined;
 
       type OptionKey = 'option1' | 'option2' | 'option3';
       const optionKeys: OptionKey[] = ['option1', 'option2', 'option3'];
@@ -167,6 +186,11 @@ export const prepareProductsForImportStep = createStep(
         thumbnail: shopifyProduct.images?.[0]?.src,
         tag_ids: tagIdsToLink,
         type_id: typeToLink?.id,
+        ...(productCategoryIds?.length
+          ? {
+              category_ids: productCategoryIds,
+            }
+          : null),
         sales_channels: [
           {
             id: stores[0].default_sales_channel_id,

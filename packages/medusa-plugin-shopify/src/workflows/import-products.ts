@@ -10,6 +10,7 @@ import {
 } from '@medusajs/medusa/core-flows';
 
 import { ShopifyProduct } from '../modules/shopify/types';
+import { ensureShopifyGenderCategoriesStep } from './steps/ensure-shopify-gender-categories';
 import { getExistingProductTagsStep } from './steps/get-existing-product-tags';
 import { getExistingProductTypesStep } from './steps/get-existing-product-types';
 import { getExistingProductsStep } from './steps/get-existing-products';
@@ -26,6 +27,7 @@ export const importProductsWorkflow = createWorkflow(
     name: importProductsWorkflowId,
   },
   ({ products }: ImportProductsWorkflowInput) => {
+    const { genderCategoryIds } = ensureShopifyGenderCategoriesStep();
     const { tags: productTags } = getExistingProductTagsStep({});
     const { productTypes } = getExistingProductTypesStep({});
     const { data: stores } = useQueryGraphStep({
@@ -75,6 +77,7 @@ export const importProductsWorkflow = createWorkflow(
       existingProducts,
       productTags,
       productTypes,
+      genderCategoryIds,
     });
 
     createProductsWorkflow.runAsStep({
