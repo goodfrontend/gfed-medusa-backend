@@ -53,6 +53,7 @@ module.exports = defineConfig({
         appId: process.env.ALGOLIA_APP_ID!,
         apiKey: process.env.ALGOLIA_API_KEY!,
         productIndexName: process.env.ALGOLIA_PRODUCT_INDEX_NAME!,
+        productBrowseIndexName: process.env.ALGOLIA_PRODUCT_BROWSE_INDEX_NAME,
       },
     },
     {
