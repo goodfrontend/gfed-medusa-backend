@@ -1,6 +1,7 @@
 {
   "$schema": "https://turborepo.com/schema.json",
   "globalEnv": [
+    "ALGOLIA_PRODUCT_BROWSE_INDEX_NAME",
     "SEED_SAMPLE_CATALOG",
     "STRIPE_API_KEY"
   ],
