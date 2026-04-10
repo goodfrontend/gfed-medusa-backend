@@ -17,6 +17,7 @@ SCHEDULE_TYPES = %w[immediate scheduled recurring window_scheduled window_recurr
 WINDOW_SCHEDULE_TYPES = %w[window_scheduled window_recurring].freeze
 LIFECYCLE_DATABASE_CONSUMER_SERVICE = "gfed-medusa-be".freeze
 CONDITIONAL_LIFECYCLE_DATABASE = "gfed-medusa-database-paid".freeze
+SERVICE_SHORTCUT_ENVIRONMENTS = %w[qa smoke].freeze
 
 def abort_with(message)
   warn(message)
@@ -139,17 +140,52 @@ def load_available_services(render_file)
   services
 end
 
-def resolve_services(input, available_services)
+def load_service_shortcuts(render_file)
+  yaml = load_render_config(render_file)
+
+  Array(yaml["projects"]).flat_map do |project|
+    next [] unless project.is_a?(Hash)
+
+    Array(project["environments"]).map do |environment|
+      next unless environment.is_a?(Hash)
+
+      shortcut_name = environment["name"].to_s.strip.downcase
+      next unless SERVICE_SHORTCUT_ENVIRONMENTS.include?(shortcut_name)
+
+      service_names = Array(environment["services"]).map do |service|
+        service.is_a?(Hash) ? service["name"].to_s.strip : ""
+      end
+
+      database_names = Array(environment["databases"]).flat_map do |database|
+        database_resource_names(database)
+      end
+
+      shortcut_targets = (service_names + database_names).reject(&:empty?).uniq
+      next if shortcut_targets.empty?
+
+      [shortcut_name, shortcut_targets]
+    end.compact
+  end.to_h
+end
+
+def resolve_services(input, available_services, service_shortcuts = {})
   raw = input.to_s.strip
   return available_services.dup if raw.empty? || raw.casecmp("all").zero?
 
-  selected = raw.split(/[\n,]+/).map(&:strip).reject(&:empty?).uniq
-  abort_with("services must be a comma-separated list of render.yaml resource names or 'all'.") if selected.empty?
+  selected_tokens = raw.split(/[\n,]+/).map(&:strip).reject(&:empty?).uniq
+  abort_with("services must be a comma-separated list of render.yaml resource names, #{service_shortcuts.keys.join(', ')}, or 'all'.") if selected_tokens.empty?
 
+  expanded = selected_tokens.flat_map do |token|
+    service_shortcuts.fetch(token.downcase, token)
+  end
+
+  selected = expanded.uniq
   unknown = selected - available_services
   unless unknown.empty?
+    supported_shortcuts = service_shortcuts.keys.sort
+    shortcuts_message = supported_shortcuts.empty? ? "" : " Supported shortcuts: #{supported_shortcuts.join(', ')}."
     abort_with(
-      "Unknown render resources: #{unknown.join(', ')}. Available resources: #{available_services.join(', ')}."
+      "Unknown render resources: #{unknown.join(', ')}. Available resources: #{available_services.join(', ')}.#{shortcuts_message}"
     )
   end
 
@@ -425,6 +461,7 @@ def command_configure(render_file, store_file, output_file)
 
   now_utc = Time.now.utc
   available_services = load_available_services(render_file)
+  service_shortcuts = load_service_shortcuts(render_file)
   store = load_store(store_file)
   store["available_services"] = available_services
   store["updated_at_utc"] = now_utc.iso8601
@@ -473,7 +510,7 @@ def command_configure(render_file, store_file, output_file)
     return
   end
 
-  selected_services = resolve_services(services_input, available_services)
+  selected_services = resolve_services(services_input, available_services, service_shortcuts)
 
   if schedule_type == "immediate"
     result = {
