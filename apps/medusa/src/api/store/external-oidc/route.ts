@@ -110,5 +110,5 @@ export const POST = async (
     }
   );
 
-  return res.status(200).json({ token: jwt });
+  return res.status(200).json({ token: jwt, customer: { id: customer.id } });
 };
